@@ -1,0 +1,89 @@
+# -*- mode: python ; coding: utf-8 -*-
+import os
+
+# 获取项目根目录和 app 目录
+spec_root = os.path.abspath(SPECPATH)
+app_dir = os.path.join(spec_root, 'app')
+
+a = Analysis(
+    ['app\\server.py'],
+    pathex=[app_dir],  # 添加 app 目录到搜索路径
+    binaries=[],
+    datas=[
+        ('templates', 'templates'),
+        ('plugins', 'plugins'),
+        ('app/src', 'src'),  # 将 src 目录打包到根目录
+    ],
+    hiddenimports=[
+        'src',
+        'src.plugins',
+        'src.plugins.plugin_manager',
+        'src.services',
+        'src.services.task_manager',
+        'src.services.download_service',
+        'src.services.ppt_service',
+        'src.services.transcribe_service',
+        'src.api',
+        'src.api.auth',
+        'src.api.videos',
+        'src.api.tasks',
+        'src.api.plugins',
+        'src.api.config',
+        'src.core',
+        'src.core.session_manager',
+        'src.core.smartclass_client',
+        'src.core.njupt_sso',
+        'src.models',
+        'src.models.models',
+        'src.utils',
+        'src.utils.config_manager',
+        'src.utils.logger',
+        'src.utils.temp_file_manager',
+        'src.utils.websocket_broadcaster',
+        'src.utils.startup_cleaner',
+        'src.utils.disk_checker',
+        'src.utils.error_handler',
+        'src.utils.exceptions',
+        'src.utils.file_merger',
+        'uvicorn.logging',
+        'uvicorn.loops.auto',
+        'uvicorn.protocols.http.auto',
+        'uvicorn.protocols.websockets.auto',
+        'uvicorn.lifespan.on',
+        'fastapi',
+        'jinja2',
+        'requests',
+        'lxml.etree',
+        'Crypto.Cipher.AES',
+        'pytz',
+        'anyio',
+    ],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+    optimize=0,
+)
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.datas,
+    [],
+    name='SmartClassDownloader',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
