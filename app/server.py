@@ -264,17 +264,51 @@ async def websocket_tasks(websocket: WebSocket):
     await broadcaster.connect(websocket)
     
     try:
-        # 发送初始任务列表
+        # 发送初始任务列表（完整字段）
         tasks = task_manager.get_all_tasks()
+        
+        def _fmt_size(b):
+            if b < 1024: return f"{b} B"
+            elif b < 1024*1024: return f"{b/1024:.1f} KB"
+            elif b < 1024*1024*1024: return f"{b/1024/1024:.1f} MB"
+            else: return f"{b/1024/1024/1024:.2f} GB"
+        
+        def _fmt_speed(s):
+            if s < 0.1: return "0 KB/s"
+            if s < 1024*1024: return f"{s/1024:.0f} KB/s"
+            return f"{s/1024/1024:.2f} MB/s"
+        
+        def _fmt_eta(total, downloaded, speed):
+            if total <= 0 or speed < 1024: return "--"
+            remaining = total - downloaded
+            if remaining <= 0: return "0s"
+            secs = int(remaining / speed)
+            if secs < 60: return f"{secs}s"
+            elif secs < 3600: return f"{secs//60}m {secs%60}s"
+            else: return f"{secs//3600}h {(secs%3600)//60}m"
+        
+        status_map = {
+            'queued': '排队中', 'running': '进行中', 'waiting': '等待资源',
+            'completed': '已完成', 'failed': '失败', 'cancelled': '已取消'
+        }
+        
         tasks_data = [
             {
                 'id': t.id,
                 'title': t.title,
                 'status': t.status.value,
+                'status_text': status_map.get(t.status.value, '未知'),
                 'progress': t.progress,
                 'message': t.message,
+                'error': t.error,
                 'speed': t.speed,
-                'current_action': t.current_action
+                'speed_str': _fmt_speed(t.speed),
+                'current_action': t.current_action,
+                'total_size': t.total_size,
+                'downloaded_size': t.downloaded_size,
+                'total_size_str': _fmt_size(t.total_size),
+                'downloaded_str': _fmt_size(t.downloaded_size),
+                'eta_str': _fmt_eta(t.total_size, t.downloaded_size, t.speed),
             }
             for t in tasks
         ]

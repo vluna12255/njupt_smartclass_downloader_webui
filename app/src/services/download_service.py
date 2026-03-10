@@ -74,7 +74,12 @@ class DownloadService:
             "last_time": time.time(),
             "stop": False
         }
-        
+
+        # ETA 二次 EWMA 状态（跨 monitor_loop 调用保持）
+        _eta_state = {"smoothed_eta": None, "last_eta_update": 0.0}
+        _ETA_ALPHA = 0.15          # ETA EWMA 平滑系数（越小越稳）
+        _ETA_UPDATE_INTERVAL = 2.0  # ETA 最低刷新间隔（秒）
+
         def download_part(index, start, end):
             """下载单个分片"""
             part_file = f"{tmp_path}.part{index}"
@@ -120,47 +125,77 @@ class DownloadService:
                     raise
 
         def monitor_loop():
-            """实时监控下载进度"""
-            speed_samples = []
-            max_samples = 5
-            
+            """实时监控下载进度（滑动窗口测速 + ETA 二次 EWMA 平滑）"""
+            # 滑动时间窗口：保存 (timestamp, bytes_downloaded) 的环形缓冲
+            WINDOW_SECONDS = 6.0     # 窗口宽度（秒）
+            window: list = []        # 每个元素为 (t, bytes)
+            SPEED_ALPHA = 0.25       # 速度 EWMA 系数
+            ewma_speed = 0.0
+
             while not state["stop"]:
                 time.sleep(0.2)
                 with self.state_lock:
                     curr_dl = state["downloaded"]
                     curr_t = time.time()
                     diff_t = curr_t - state["last_time"]
-                    
+
                     if diff_t > 0.15:
-                        instant_speed = (curr_dl - state["last_downloaded"]) / diff_t
-                        
-                        speed_samples.append(instant_speed)
-                        if len(speed_samples) > max_samples:
-                            speed_samples.pop(0)
-                        
-                        smooth_speed = sum(speed_samples) / len(speed_samples) if speed_samples else 0
-                        
+                        # --- 滑动窗口：追加新采样点并淘汰过期点 ---
+                        window.append((curr_t, curr_dl))
+                        cutoff = curr_t - WINDOW_SECONDS
+                        while len(window) > 1 and window[0][0] < cutoff:
+                            window.pop(0)
+
+                        # 用窗口首尾计算区间平均速度
+                        if len(window) >= 2:
+                            dt = window[-1][0] - window[0][0]
+                            db = window[-1][1] - window[0][1]
+                            window_speed = db / dt if dt > 0 else 0.0
+                        else:
+                            window_speed = 0.0
+
+                        # 对窗口速度再做一次 EWMA 平滑
+                        if ewma_speed == 0.0:
+                            ewma_speed = window_speed
+                        else:
+                            ewma_speed = SPEED_ALPHA * window_speed + (1 - SPEED_ALPHA) * ewma_speed
+
                         state["last_downloaded"] = curr_dl
                         state["last_time"] = curr_t
-                        
+
                         percent = curr_dl / total_size if total_size > 0 else 0
-                        
-                        if smooth_speed > 1024:
-                            remaining_bytes = total_size - curr_dl
-                            eta_seconds = remaining_bytes / smooth_speed
-                            
-                            if eta_seconds < 60:
-                                eta_msg = f"剩余 {int(eta_seconds)}秒"
-                            elif eta_seconds < 3600:
-                                eta_msg = f"剩余 {int(eta_seconds/60)}分钟"
+
+                        # --- ETA 二次 EWMA + 降频刷新 ---
+                        if ewma_speed > 1024:
+                            raw_eta = (total_size - curr_dl) / ewma_speed
+                            # 首次直接赋值，后续做 EWMA 平滑
+                            if _eta_state["smoothed_eta"] is None:
+                                _eta_state["smoothed_eta"] = raw_eta
                             else:
-                                eta_msg = f"剩余 {int(eta_seconds/3600)}小时"
+                                _eta_state["smoothed_eta"] = (
+                                    _ETA_ALPHA * raw_eta
+                                    + (1 - _ETA_ALPHA) * _eta_state["smoothed_eta"]
+                                )
+
+                            # 降频：每 _ETA_UPDATE_INTERVAL 秒才更新显示文字
+                            if curr_t - _eta_state["last_eta_update"] >= _ETA_UPDATE_INTERVAL:
+                                _eta_state["last_eta_update"] = curr_t
+                                s = _eta_state["smoothed_eta"]
+                                if s < 60:
+                                    eta_msg = f"剩余 {int(s)}秒"
+                                elif s < 3600:
+                                    eta_msg = f"剩余 {int(s/60)}分{int(s)%60}秒"
+                                else:
+                                    eta_msg = f"剩余 {int(s/3600)}小时{int(s%3600/60)}分"
+                                state["_eta_msg"] = eta_msg
                         else:
-                            eta_msg = "计算中..."
-                        
-                        update_callback(task_id, downloaded_size=curr_dl, 
+                            state.setdefault("_eta_msg", "计算中...")
+
+                        eta_msg = state.get("_eta_msg", "计算中...")
+
+                        update_callback(task_id, downloaded_size=curr_dl,
                                       progress=base_progress + (percent * chunk_progress_width),
-                                      speed=smooth_speed,
+                                      speed=ewma_speed,
                                       message=f"下载中... {eta_msg}")
 
         monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
@@ -235,48 +270,80 @@ class DownloadService:
             start_t = time.time()
             last_t = start_t
             last_downloaded = 0
-            
-            speed_samples = []
-            max_samples = 5
-            
+
+            # 滑动时间窗口（单线程版）
+            WINDOW_SECONDS = 6.0
+            window: list = []          # [(timestamp, bytes), ...]
+            SPEED_ALPHA = 0.25
+            ewma_speed = 0.0
+
+            # ETA 二次 EWMA + 降频
+            _ETA_ALPHA = 0.15
+            _ETA_UPDATE_INTERVAL = 2.0
+            smoothed_eta = None
+            last_eta_update = 0.0
+            eta_msg = "计算中..."
+
             tmp_file_path = f"{path}.{task_id}.tmp"
-            
+
             with open(tmp_file_path, 'wb') as f:
-                for chunk in resp.iter_content(chunk_size=512 * 1024):  # 减小块大小，更频繁更新
+                for chunk in resp.iter_content(chunk_size=512 * 1024):
                     if chunk:
                         f.write(chunk)
                         downloaded += len(chunk)
-                        
+
                         curr_t = time.time()
                         diff_t = curr_t - last_t
-                        
-                        # 每200ms更新一次
+
+                        # 每 200ms 更新一次速度
                         if diff_t > 0.2:
-                            instant_speed = (downloaded - last_downloaded) / diff_t
-                            
-                            # 速度平滑
-                            speed_samples.append(instant_speed)
-                            if len(speed_samples) > max_samples:
-                                speed_samples.pop(0)
-                            smooth_speed = sum(speed_samples) / len(speed_samples) if speed_samples else 0
-                            
-                            file_percent = downloaded / total_len if total_len > 0 else 0
-                            
-                            # 计算ETA
-                            if smooth_speed > 1024:
-                                eta_seconds = (total_len - downloaded) / smooth_speed
-                                if eta_seconds < 60:
-                                    eta_msg = f"剩余 {int(eta_seconds)}秒"
-                                else:
-                                    eta_msg = f"剩余 {int(eta_seconds/60)}分钟"
+                            # --- 滑动窗口 ---
+                            window.append((curr_t, downloaded))
+                            cutoff = curr_t - WINDOW_SECONDS
+                            while len(window) > 1 and window[0][0] < cutoff:
+                                window.pop(0)
+
+                            if len(window) >= 2:
+                                dt = window[-1][0] - window[0][0]
+                                db = window[-1][1] - window[0][1]
+                                window_speed = db / dt if dt > 0 else 0.0
                             else:
-                                eta_msg = "计算中..."
-                            
-                            update_callback(task_id, downloaded_size=downloaded, 
-                                          progress=base_progress + (file_percent * chunk_progress_width), 
-                                          message=f"下载中... {eta_msg}", 
-                                          speed=smooth_speed)
-                            
+                                window_speed = 0.0
+
+                            # 速度 EWMA
+                            if ewma_speed == 0.0:
+                                ewma_speed = window_speed
+                            else:
+                                ewma_speed = SPEED_ALPHA * window_speed + (1 - SPEED_ALPHA) * ewma_speed
+
+                            file_percent = downloaded / total_len if total_len > 0 else 0
+
+                            # --- ETA 二次 EWMA + 降频刷新 ---
+                            if ewma_speed > 1024:
+                                raw_eta = (total_len - downloaded) / ewma_speed
+                                if smoothed_eta is None:
+                                    smoothed_eta = raw_eta
+                                else:
+                                    smoothed_eta = (
+                                        _ETA_ALPHA * raw_eta
+                                        + (1 - _ETA_ALPHA) * smoothed_eta
+                                    )
+
+                                if curr_t - last_eta_update >= _ETA_UPDATE_INTERVAL:
+                                    last_eta_update = curr_t
+                                    s = smoothed_eta
+                                    if s < 60:
+                                        eta_msg = f"剩余 {int(s)}秒"
+                                    elif s < 3600:
+                                        eta_msg = f"剩余 {int(s/60)}分{int(s)%60}秒"
+                                    else:
+                                        eta_msg = f"剩余 {int(s/3600)}小时{int(s%3600/60)}分"
+
+                            update_callback(task_id, downloaded_size=downloaded,
+                                          progress=base_progress + (file_percent * chunk_progress_width),
+                                          message=f"下载中... {eta_msg}",
+                                          speed=ewma_speed)
+
                             last_t = curr_t
                             last_downloaded = downloaded
         

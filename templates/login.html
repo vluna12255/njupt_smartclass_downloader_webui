@@ -14,19 +14,34 @@
         </div>
         {% endif %}
 
-        <form action="/login" method="post">
+        <form action="/login" method="post" onsubmit="return validateForm()">
+            <div id="form-error" class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4 hidden"></div>
             <div class="mb-4">
                 <label class="block text-gray-700 text-sm font-bold mb-2">学号</label>
-                <input name="username" type="text" class="w-full border rounded px-3 py-2 focus:outline-none focus:ring focus:border-blue-300">
+                <input id="username" name="username" type="text" class="w-full border rounded px-3 py-2 focus:outline-none focus:ring focus:border-blue-300">
             </div>
             <div class="mb-6">
                 <label class="block text-gray-700 text-sm font-bold mb-2">密码</label>
-                <input name="password" type="password" class="w-full border rounded px-3 py-2 focus:outline-none focus:ring focus:border-blue-300">
+                <input id="password" name="password" type="password" class="w-full border rounded px-3 py-2 focus:outline-none focus:ring focus:border-blue-300">
             </div>
             <button type="submit" class="w-full bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">
                 登录
             </button>
         </form>
+        <script>
+        function validateForm() {
+            var username = document.getElementById('username').value.trim();
+            var password = document.getElementById('password').value.trim();
+            var errorDiv = document.getElementById('form-error');
+            if (!username || !password) {
+                errorDiv.textContent = '请输入用户名及密码';
+                errorDiv.classList.remove('hidden');
+                return false;
+            }
+            errorDiv.classList.add('hidden');
+            return true;
+        }
+        </script>
     </div>
 </body>
 </html>

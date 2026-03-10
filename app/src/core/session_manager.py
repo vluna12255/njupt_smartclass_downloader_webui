@@ -30,21 +30,24 @@ class SessionManager:
     def get_client(self) -> Optional[SmartclassClient]:
         """获取客户端"""
         if self.smart_class_client and not self.is_session_valid():
-            logger.info("检测到 Session 过期，尝试自动重连...")
+            
             self.perform_auto_login()
         return self.smart_class_client
     
     def is_session_valid(self) -> bool:
-        """检查会话是否有效"""
         if not self.global_session:
             return False
         try:
-            r = self.global_session.get("https://njupt.smartclass.cn/", 
-                                       allow_redirects=False, timeout=5)
-            if r.status_code == 302 and "Login" in r.headers.get("Location", ""):
-                return False
+            r = self.global_session.get("https://njupt.smartclass.cn/",
+                                        allow_redirects=False, timeout=120)
+            if r.status_code == 302:
+                location = r.headers.get("Location", "").lower()
+                if "login" in location:
+                    logger.info("检测到 Session 过期，尝试自动重连...")
+                    return False
             return True
-        except:
+        except Exception:
+            logger.warning("无法检测 Session 状态，尝试自动重连...")
             return False
     
     def perform_auto_login(self):

@@ -54,6 +54,12 @@
             background-color: #2563eb;
             color: white;
         }
+
+        /* 任务卡片悬浮：不使用 transition，避免 DOM 替换时触发闪烁 */
+        .task-card:hover {
+            border-color: #93c5fd;
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -1px rgba(0,0,0,0.04);
+        }
     </style>
 </head>
 <body class="bg-slate-50 min-h-screen flex flex-col selection:bg-blue-100 selection:text-blue-700 overflow-x-hidden">
@@ -124,7 +130,6 @@
                         </button>
                         <button onclick="switchTab('tasks')" id="tab-tasks" class="tab-btn px-4 md:px-5 py-2 rounded-lg text-sm font-bold text-slate-500 hover:bg-slate-100 hover:text-slate-700 transition-all flex items-center gap-2 whitespace-nowrap">
                             <span>任务</span>
-                            <span id="task-badge" class="hidden w-2 h-2 rounded-full bg-red-500"></span>
                         </button>
                     </div>
                 </div>
@@ -163,15 +168,12 @@
         </div>
 
         <div id="view-tasks" class="hidden">
-            <div class="bg-white/80 backdrop-blur-md rounded-3xl shadow-sm border border-white/60 min-h-[400px] overflow-hidden" 
-                 hx-get="/tasks_status" 
-                 hx-trigger="every 2s" 
-                 hx-target="#task-list-container"
-                 id="task-list-container">
-                <div class="flex flex-col justify-center items-center h-80 text-slate-400 gap-4">
+            <div class="bg-white/80 backdrop-blur-md rounded-3xl shadow-sm border border-white/60 min-h-[400px] overflow-hidden" id="task-list-container">
+                <div class="flex flex-col justify-center items-center h-80 text-slate-400 gap-4" id="task-list-loading">
                     <div class="w-12 h-12 border-4 border-blue-100 border-t-blue-500 rounded-full animate-spin"></div>
                     <span class="text-sm font-medium">任务列表加载中...</span>
                 </div>
+                <div id="task-list-inner" class="hidden"></div>
             </div>
         </div>
     </div>
@@ -551,49 +553,42 @@
         window.currentConfig = {};
         let ws = null;
         let wsReconnectTimer = null;
+        let wsOnline = false;
 
-        // WebSocket 连接管理
+        // ── 任务状态存储（taskId -> taskData）──
+        const taskStore = {};
+
+        // ── WebSocket 连接管理 ──
         function connectWebSocket() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = `${protocol}//${window.location.host}/ws/tasks`;
-            
             try {
                 ws = new WebSocket(wsUrl);
-                
+
                 ws.onopen = function() {
-                    console.log('WebSocket 连接已建立');
-                    if (wsReconnectTimer) {
-                        clearTimeout(wsReconnectTimer);
-                        wsReconnectTimer = null;
-                    }
-                    
-                    // 启动心跳
+                    wsOnline = true;
+                    if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+                    document.getElementById('server-status-bar')?.classList.add('hidden');
                     startHeartbeat();
                 };
-                
+
                 ws.onmessage = function(event) {
+                    if (event.data === 'pong') return;
                     try {
-                        const data = JSON.parse(event.data);
-                        handleWebSocketMessage(data);
-                    } catch (e) {
-                        // 可能是心跳响应 'pong'
-                        if (event.data !== 'pong') {
-                            console.error('WebSocket 消息解析失败:', e);
-                        }
-                    }
+                        const msg = JSON.parse(event.data);
+                        handleWebSocketMessage(msg);
+                    } catch(e) { console.error('WS 消息解析失败:', e); }
                 };
-                
-                ws.onerror = function(error) {
-                    console.error('WebSocket 错误:', error);
-                };
-                
+
+                ws.onerror = function() {};
+
                 ws.onclose = function() {
-                    console.log('WebSocket 连接已关闭，5秒后重连...');
+                    wsOnline = false;
                     stopHeartbeat();
+                    document.getElementById('server-status-bar')?.classList.remove('hidden');
                     wsReconnectTimer = setTimeout(connectWebSocket, 5000);
                 };
-            } catch (e) {
-                console.error('WebSocket 连接失败:', e);
+            } catch(e) {
                 wsReconnectTimer = setTimeout(connectWebSocket, 5000);
             }
         }
@@ -602,44 +597,160 @@
         function startHeartbeat() {
             stopHeartbeat();
             heartbeatTimer = setInterval(() => {
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send('ping');
-                }
-            }, 30000); // 每30秒发送一次心跳
+                if (ws && ws.readyState === WebSocket.OPEN) ws.send('ping');
+            }, 30000);
         }
-
         function stopHeartbeat() {
-            if (heartbeatTimer) {
-                clearInterval(heartbeatTimer);
-                heartbeatTimer = null;
+            if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+        }
+
+        // ── WebSocket 消息分发 ──
+        function handleWebSocketMessage(msg) {
+            if (msg.type === 'task_list') {
+                const tasks = msg.data || [];
+                tasks.forEach(t => { taskStore[t.id] = t; });
+                renderTaskList();
+                checkLoginStatusFromWS();
+            } else if (msg.type === 'task_update') {
+                const t = msg.data;
+                taskStore[t.id] = t;
+                renderOrUpdateTaskCard(t);
+                if (t.id && t.id.startsWith('install_') && (t.status === 'completed' || t.status === 'failed')) {
+                    const pluginName = t.id.replace('install_', '');
+                    checkPluginStatus(pluginName, pluginColorMap[pluginName] || 'indigo', false);
+                }
+            } else if (msg.type === 'notification') {
+                showToast(msg.data && msg.data.message ? msg.data.message : msg.message || '');
             }
         }
 
-        function handleWebSocketMessage(data) {
-            // 处理 WebSocket 消息
-            if (data.type === 'task_list') {
-                // 初始任务列表
-                console.log('收到任务列表:', data.data);
-            } else if (data.type === 'task_update') {
-                // 任务更新，刷新任务列表
-                const container = document.getElementById('task-list-container');
-                if (container && !document.getElementById('view-tasks').classList.contains('hidden')) {
-                    htmx.trigger(container, 'tasks_refresh');
-                }
-                
-                // 更新任务徽章
-                if (data.has_active_tasks) {
-                    document.getElementById('task-badge')?.classList.remove('hidden');
-                } else {
-                    document.getElementById('task-badge')?.classList.add('hidden');
-                }
-            } else if (data.type === 'notification') {
-                // 显示通知
-                showToast(data.message);
+        const pluginColorMap = { whisper: 'indigo', funasr: 'orange', slides_extractor: 'emerald' };
+
+        const STATUS_CLASSES = {
+            completed: 'bg-green-100 text-green-700',
+            failed:    'bg-red-100 text-red-700',
+            running:   'bg-blue-100 text-blue-700',
+            waiting:   'bg-yellow-100 text-yellow-700',
+            queued:    'bg-gray-100 text-gray-600',
+        };
+        const STATUS_TEXT = {
+            completed: '已完成', failed: '失败', running: '进行中',
+            waiting: '等待资源', queued: '排队中', cancelled: '已取消'
+        };
+
+        function escHtml(str) {
+            return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        }
+
+        function buildTaskCardHTML(t) {
+            const isInstall = t.id && (t.id.includes('install') || (t.title && t.title.includes('安装')));
+            const statusCls = STATUS_CLASSES[t.status] || 'bg-gray-100 text-gray-600';
+            const statusTxt = t.status_text || STATUS_TEXT[t.status] || t.status;
+            const showProgress = !isInstall && t.status === 'running' && t.total_size > 0;
+            const pct = t.total_size > 0 ? Math.round(t.downloaded_size / t.total_size * 100) : 0;
+
+            const glowHTML = isInstall && t.status === 'running'
+                ? `<div class="absolute top-0 right-0 -mt-4 -mr-4 w-24 h-24 bg-blue-50 rounded-full blur-2xl opacity-60 animate-pulse"></div>`
+                : '';
+
+            let sublineHTML = '';
+            if (t.status === 'failed') {
+                sublineHTML = `<span class="text-xs text-red-500 font-medium truncate">❌ ${escHtml(t.error || '')}</span>`;
+            } else if (t.message) {
+                const prefix = isInstall ? `<span class="text-indigo-500">>></span> ` : '';
+                sublineHTML = `<span class="text-xs text-gray-500 font-mono truncate transition-all">${prefix}${escHtml(t.message)}</span>`;
+            }
+
+            const progressHTML = showProgress ? `
+                <div class="mt-3 flex items-center gap-3">
+                    <div class="flex-grow h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                        <div class="h-full bg-blue-500 rounded-full transition-all duration-300" style="width:${pct}%"></div>
+                    </div>
+                    <div class="text-[10px] text-gray-400 font-mono whitespace-nowrap flex items-center gap-2">
+                        <span>${escHtml(t.downloaded_str||'')}/${escHtml(t.total_size_str||'')}</span>
+                        <span class="w-px h-3 bg-gray-200"></span>
+                        <span class="text-green-600 font-bold">${escHtml(t.speed_str||'')}</span>
+
+                    </div>
+                </div>` : '';
+
+            return `
+            <div class="bg-white px-5 py-4 rounded-xl shadow-sm border border-gray-200 relative overflow-hidden task-card" data-task-id="${escHtml(t.id)}">
+                ${glowHTML}
+                <div class="flex justify-between items-start relative z-10">
+                    <div class="flex items-center gap-3 overflow-hidden mr-4 flex-1">
+                        <div class="flex flex-col min-w-0">
+                            <span class="text-sm font-bold text-gray-800 truncate" title="${escHtml(t.title)}">${escHtml(t.title)}</span>
+                            ${sublineHTML}
+                        </div>
+                    </div>
+                    <span class="text-xs font-bold whitespace-nowrap px-2 py-1 rounded-md ${statusCls}">${escHtml(statusTxt)}</span>
+                </div>
+                ${progressHTML}
+            </div>`;
+        }
+
+        function renderTaskList() {
+            const loading = document.getElementById('task-list-loading');
+            const inner = document.getElementById('task-list-inner');
+            if (!inner) return;
+            if (loading) loading.classList.add('hidden');
+            inner.classList.remove('hidden');
+
+            const tasks = Object.values(taskStore);
+            if (tasks.length === 0) {
+                inner.innerHTML = `
+                <div class="max-w-4xl mx-auto p-4">
+                    <div class="text-gray-400 text-sm py-12 border border-dashed border-gray-300 rounded-xl text-center bg-gray-50 flex flex-col items-center gap-2">
+                        <svg class="w-8 h-8 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>
+                        <span>暂无进行中的任务</span>
+                    </div>
+                </div>`;
+                return;
+            }
+            const sorted = tasks.slice().sort((a, b) => {
+                const order = { running:0, waiting:1, queued:2, failed:3, completed:4, cancelled:5 };
+                return (order[a.status]||9) - (order[b.status]||9);
+            });
+            inner.innerHTML = `<div class="max-w-4xl mx-auto p-4"><div class="space-y-3">${sorted.map(buildTaskCardHTML).join('')}</div></div>`;
+        }
+
+        function renderOrUpdateTaskCard(t) {
+            const inner = document.getElementById('task-list-inner');
+            if (!inner || inner.classList.contains('hidden')) { renderTaskList(); return; }
+
+            const existing = inner.querySelector(`[data-task-id="${CSS.escape(t.id)}"]`);
+            if (existing) {
+                const newCard = document.createElement('div');
+                newCard.innerHTML = buildTaskCardHTML(t);
+                const newEl = newCard.firstElementChild;
+                existing.replaceWith(newEl);
+            } else {
+                // 新任务：重新渲染整个列表（保持排序）
+                renderTaskList();
             }
         }
 
-        // 搜索功能
+        // ── 登录状态检查（通过 /api/status，仅在 WS 首次连接时调用一次）──
+        let _loginChecked = false;
+        function checkLoginStatusFromWS() {
+            if (_loginChecked) return;
+            _loginChecked = true;
+            fetch('/api/status', { headers: { 'Cache-Control': 'no-cache' } })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.logged_in === false) {
+                        const toast = document.getElementById('relogin-toast');
+                        if (toast) {
+                            toast.style.display = 'flex';
+                            toast.classList.remove('translate-y-20', 'opacity-0');
+                            setTimeout(() => window.location.reload(), 2000);
+                        }
+                    }
+                })
+                .catch(() => {});
+        }
+
         function performSearch() {
             const input = document.getElementById('search-input');
             const keyword = input.value.trim();
@@ -756,12 +867,6 @@
                 });
             }
             
-            document.body.addEventListener('htmx:afterSwap', function(evt) {
-                if (evt.detail.target.id === 'video-container') {
-                    updateDownloadBtn();
-                }
-            });
-            
             await refreshConfig();
         });
 
@@ -782,8 +887,8 @@
             } else {
                 document.getElementById('view-search').classList.add('hidden');
                 document.getElementById('view-tasks').classList.remove('hidden');
-                const container = document.getElementById('task-list-container');
-                if(container) htmx.trigger(container, 'tasks_refresh');
+                // WS 驱动，无需手动触发轮询
+                renderTaskList();
             }
         }
 
@@ -803,41 +908,7 @@
             }
         }
 
-        (function() {
-            const statusBar = document.getElementById('server-status-bar');
-            const reloginToast = document.getElementById('relogin-toast');
-            let isOffline = false;
-
-            function checkServerStatus() {
-                fetch('/api/status', {
-                    method: 'GET',
-                    headers: {'Pragma': 'no-cache', 'Cache-Control': 'no-cache'}
-                })
-                .then(r => r.json())
-                .then(data => {
-                    if (isOffline) {
-                        statusBar.classList.add('hidden');
-                        isOffline = false;
-                    }
-                    if (data.status === 'online') {
-                        if (data.logged_in === false) {
-                            if(reloginToast) {
-                                reloginToast.style.display = 'flex';
-                                reloginToast.classList.remove('translate-y-20', 'opacity-0');
-                                setTimeout(() => { window.location.reload(); }, 2000);
-                            }
-                        } else {
-                            if(reloginToast) reloginToast.style.display = 'none';
-                        }
-                    }
-                })
-                .catch(error => {
-                    if(statusBar) statusBar.classList.remove('hidden');
-                    isOffline = true;
-                });
-            }
-            setInterval(checkServerStatus, 3000);
-        })();
+        // 服务器心跳：复用 WebSocket 连接状态，ws.onclose/onopen 已处理断线提示，无需额外 HTTP 轮询
 
         function toggleSelection(element) {
             const checkbox = element.querySelector('input[type="checkbox"]');
@@ -1070,39 +1141,10 @@
             checkPluginStatus('slides_extractor', 'emerald', true);
 
             document.getElementById('settings-modal').classList.remove('hidden');
-            
-            // 启动定期状态检查（仅在有插件正在安装/卸载时）
-            startPluginStatusPolling();
         };
         
-        // 定期检查插件状态
-        let pluginStatusPollingInterval = null;
-        
-        function startPluginStatusPolling() {
-            stopPluginStatusPolling();
-            pluginStatusPollingInterval = setInterval(async () => {
-                const modal = document.getElementById('settings-modal');
-                if (modal && !modal.classList.contains('hidden')) {
-                    // 不传 isInitialCheck 参数，避免显示"检测中"
-                    checkPluginStatus('whisper', 'indigo', false);
-                    checkPluginStatus('funasr', 'orange', false);
-                    checkPluginStatus('slides_extractor', 'emerald', false);
-                } else {
-                    stopPluginStatusPolling();
-                }
-            }, 2000);
-        }
-        
-        function stopPluginStatusPolling() {
-            if (pluginStatusPollingInterval) {
-                clearInterval(pluginStatusPollingInterval);
-                pluginStatusPollingInterval = null;
-            }
-        }
-        
-        // 关闭设置的函数
+        // 插件轮询已移除：由 WebSocket task_update 事件驱动
         function closeSettings() {
-            stopPluginStatusPolling();
             document.getElementById('settings-modal').classList.add('hidden');
         }
 

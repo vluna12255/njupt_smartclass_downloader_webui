@@ -168,14 +168,61 @@ class TaskManager:
                     setattr(task, k, v)
             
             try:
+                # 格式化辅助函数
+                def _fmt_size(b):
+                    if b < 1024: return f"{b} B"
+                    elif b < 1024*1024: return f"{b/1024:.1f} KB"
+                    elif b < 1024*1024*1024: return f"{b/1024/1024:.1f} MB"
+                    else: return f"{b/1024/1024/1024:.2f} GB"
+                
+                def _fmt_speed(s):
+                    if s < 0.1: return "0 KB/s"
+                    if s < 1024*1024: return f"{s/1024:.0f} KB/s"
+                    return f"{s/1024/1024:.2f} MB/s"
+                
+                def _fmt_eta(total, downloaded, speed):
+                    if total <= 0 or speed < 1024: return "--"
+                    remaining = total - downloaded
+                    if remaining <= 0: return "0s"
+                    secs = int(remaining / speed)
+                    if secs < 60: return f"{secs}s"
+                    elif secs < 3600: return f"{secs//60}m {secs%60}s"
+                    else: return f"{secs//3600}h {(secs%3600)//60}m"
+                
+                status_map = {
+                    TaskStatus.QUEUED: "排队中",
+                    TaskStatus.RUNNING: "进行中",
+                    TaskStatus.WAITING: "等待资源",
+                    TaskStatus.COMPLETED: "已完成",
+                    TaskStatus.FAILED: "失败",
+                    TaskStatus.CANCELLED: "已取消"
+                }
+                status_val = task.status.value if hasattr(task.status, 'value') else str(task.status)
+                
+                # 检查是否有活跃任务（用于前端徽章）
+                active_statuses = {TaskStatus.RUNNING, TaskStatus.QUEUED, TaskStatus.WAITING}
+                has_active = any(
+                    t.status in active_statuses
+                    for t in self.tasks.values()
+                )
+                
                 task_data = {
                     'id': task.id,
                     'title': task.title,
-                    'status': task.status.value if hasattr(task.status, 'value') else str(task.status),
+                    'status': status_val,
+                    'status_text': status_map.get(task.status, "未知"),
                     'progress': task.progress,
                     'message': task.message,
+                    'error': task.error,
                     'speed': task.speed,
-                    'current_action': task.current_action
+                    'speed_str': _fmt_speed(task.speed),
+                    'current_action': task.current_action,
+                    'total_size': task.total_size,
+                    'downloaded_size': task.downloaded_size,
+                    'total_size_str': _fmt_size(task.total_size),
+                    'downloaded_str': _fmt_size(task.downloaded_size),
+                    'eta_str': _fmt_eta(task.total_size, task.downloaded_size, task.speed),
+                    'has_active_tasks': has_active,
                 }
                 broadcast_task_update_sync(task_data)
             except Exception as e:
