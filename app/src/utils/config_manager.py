@@ -8,6 +8,15 @@ from pathlib import Path
 
 from .logger import get_logger
 
+# keyring 支持：优先使用系统密钥链存储密码
+try:
+    import keyring
+    _KEYRING_AVAILABLE = True
+except ImportError:
+    _KEYRING_AVAILABLE = False
+
+_KEYRING_SERVICE = "SmartClassDownloader"
+
 logger = get_logger('config_manager')
 
 def get_app_root():
@@ -47,7 +56,7 @@ class AppConfig:
     max_chunk_workers: int = 8
     enable_resume: bool = True
     
-    # 网络超时和重试配置（新增）
+    # 网络超时和重试配置
     network_timeout: int = 30  # 网络请求超时时间（秒）
     download_timeout: int = 120  # 下载超时时间（秒）
     max_retries: int = 2  # 最大重试次数
@@ -157,14 +166,21 @@ class ConfigManager:
             logger.error(f"创建下载目录失败 {e}", exc_info=True)
 
     def save_auth(self, username: str, password: str):
-        """保存登录凭证"""
+        """保存登录凭证：密码存入系统密钥链，auth.json 只存 username"""
         if not username or not password:
             logger.warning("尝试保存空的认证信息")
             return
-            
-        auth_data = {"username": username, "password": password}
+
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
+            if _KEYRING_AVAILABLE:
+                keyring.set_password(_KEYRING_SERVICE, username, password)
+                auth_data = {"username": username, "use_keyring": True}
+                logger.info(f"密码已存入系统密钥链 ({username})")
+            else:
+                # keyring 不可用时降级明文存储并警告
+                logger.warning("keyring 不可用，降级为明文存储密码")
+                auth_data = {"username": username, "password": password}
             with open(AUTH_FILE, 'w', encoding='utf-8') as f:
                 json.dump(auth_data, f, indent=4, ensure_ascii=False)
             logger.info(f"认证信息已保存 {username}")
@@ -172,22 +188,43 @@ class ConfigManager:
             logger.error(f"权限不足，无法保存认证信息到: {AUTH_FILE}")
         except OSError as e:
             logger.error(f"保存认证信息失败: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"保存认证信息失败: {e}", exc_info=True)
 
     def get_auth(self) -> Dict[str, str]:
-        """读取登录凭证"""
-        if os.path.exists(AUTH_FILE):
-            try:
-                with open(AUTH_FILE, 'r', encoding='utf-8') as f:
-                    auth_data = json.load(f)
-                    if isinstance(auth_data, dict):
-                        return auth_data
-                    logger.warning("认证文件格式错误")
-            except json.JSONDecodeError:
-                logger.error(f"认证文件格式错误 {AUTH_FILE}")
-            except PermissionError:
-                logger.error(f"无权限读取认证文件 {AUTH_FILE}")
-            except Exception as e:
-                logger.error(f"读取认证信息失败 {e}", exc_info=True)
+        """读取登录凭证：从系统密钥链取密码，auth.json 只存 username"""
+        if not os.path.exists(AUTH_FILE):
+            return {}
+        try:
+            with open(AUTH_FILE, 'r', encoding='utf-8') as f:
+                auth_data = json.load(f)
+            if not isinstance(auth_data, dict):
+                logger.warning("认证文件格式错误")
+                return {}
+
+            username = auth_data.get("username", "")
+            if not username:
+                return {}
+
+            if auth_data.get("use_keyring") and _KEYRING_AVAILABLE:
+                password = keyring.get_password(_KEYRING_SERVICE, username) or ""
+                if not password:
+                    logger.warning(f"密钥链中未找到 {username} 的密码")
+                return {"username": username, "password": password}
+
+            if "password" in auth_data:
+                password = auth_data["password"]
+                if password and _KEYRING_AVAILABLE:
+                    logger.info("检测到旧版明文密码，自动迁移到系统密钥链...")
+                    self.save_auth(username, password)
+                return {"username": username, "password": password}
+
+        except json.JSONDecodeError:
+            logger.error(f"认证文件格式错误 {AUTH_FILE}")
+        except PermissionError:
+            logger.error(f"无权限读取认证文件 {AUTH_FILE}")
+        except Exception as e:
+            logger.error(f"读取认证信息失败 {e}", exc_info=True)
         return {}
 
     def save(self, new_config: Dict[str, Any]) -> tuple[bool, Optional[str]]:

@@ -75,6 +75,9 @@ def build():
         "--include-module=Crypto.Cipher.AES",
         "--include-module=pytz",
         "--include-package=anyio",
+        "--include-package=keyring",
+        "--include-module=keyring.backends.Windows",
+        "--include-module=keyring.backends.fail",
         
         "--remove-output",
         str(MAIN_SCRIPT)
