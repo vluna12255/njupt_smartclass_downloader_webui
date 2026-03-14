@@ -33,7 +33,7 @@ logger = get_logger('task_manager')
 class TaskManager:
     """任务调度器"""
     
-    def __init__(self, max_download_concurrent=None, max_whisper_concurrent=1):
+    def __init__(self, max_download_concurrent=None, max_whisper_concurrent=1, max_ppt_concurrent=1):
         self.tasks: Dict[str, TaskInfo] = {}
         self.lock = threading.Lock()
         
@@ -46,6 +46,7 @@ class TaskManager:
         
         self.download_sem = threading.Semaphore(max_download_concurrent)
         self.whisper_sem = threading.Semaphore(max_whisper_concurrent)
+        self.ppt_sem = threading.Semaphore(max_ppt_concurrent)
         
         self.download_service = DownloadService()
         self.transcribe_service = TranscribeService()
@@ -572,26 +573,21 @@ class TaskManager:
                 self._update_task(task_id, current_action="提取 PPT", 
                                 message="检查 PPT 插件...", progress=ppt_start)
                 
-                # 使用插件提取 PPT
                 if self.ppt_service:
                     try:
                         from ..plugins.plugin_manager import plugin_manager
                         
                         plugin_name = "slides_extractor"
-                        # 检查安装状态（不检查运行状态，避免 HTTP 请求）
                         status = plugin_manager.get_plugin_status(plugin_name, check_running=False)
                         
                         if not status["installed"]:
                             logger.warning(f"Task {task_id}: PPT插件未安装，跳过")
                             self._update_task(task_id, message="PPT插件未安装，跳过", progress=ppt_end)
                         else:
-                            # 自动唤醒服务（避免重复启动）
                             self._update_task(task_id, message="正在唤醒 PPT 提取服务...")
                             
-                            # 尝试启动服务，如果已在运行则跳过
                             start_result = plugin_manager.start_service(plugin_name)
                             if start_result:
-                                # 只有真正启动了新进程才等待
                                 logger.info(f"Task {task_id}: PPT 新进程已启动，等待服务就绪...")
                                 service_started = False
                                 for _ in range(60):
@@ -603,56 +599,58 @@ class TaskManager:
                                 if not service_started:
                                     raise Exception("PPT 提取服务启动超时")
                             else:
-                                # 服务已在运行，直接使用
                                 logger.info(f"Task {task_id}: PPT 服务已在运行，直接使用")
                             
-                            # 调用服务
-                            self._update_task(task_id, message="正在分析幻灯片 (请稍候)...", 
-                                            progress=ppt_start + 5)
+                            self._update_task(task_id, status=TaskStatus.WAITING, 
+                                            message="等待 PPT 提取队列...")
                             
-                            ppt_success = False
-                            base_url = plugin_manager.get_service_url(plugin_name)
-                            if not base_url:
-                                raise Exception("无法获取 PPT 插件服务地址")
-                            
-                            api_url = f"{base_url}/extract_slides"
-                            STEP_RETRIES = saved_config.max_retries
-                            
-                            for attempt in range(STEP_RETRIES):
-                                try:
-                                    payload = {
-                                        "video_path": os.path.abspath(vga_path),
-                                        "output_path": os.path.abspath(pdf_path),
-                                        "threshold": 0.02,
-                                        "min_time_gap": 3.0
-                                    }
-                                    resp = requests.post(api_url, json=payload, timeout=900)
-                                    
-                                    if resp.status_code == 200:
-                                        result = resp.json()
-                                        if result.get("status") == "success" and self._is_file_valid(pdf_path, min_size=1024):
-                                            ppt_success = True
-                                            logger.info(f"Task {task_id}: PPT 提取成功")
-                                            break
-                                    else:
-                                        logger.error(f"PPT Plugin Error ({resp.status_code}): {resp.text}")
+                            with self.ppt_sem:
+                                self._update_task(task_id, status=TaskStatus.RUNNING,
+                                                message="正在分析幻灯片 (请稍候)...", 
+                                                progress=ppt_start + 5)
+                                
+                                ppt_success = False
+                                base_url = plugin_manager.get_service_url(plugin_name)
+                                if not base_url:
+                                    raise Exception("无法获取 PPT 插件服务地址")
+                                
+                                api_url = f"{base_url}/extract_slides"
+                                STEP_RETRIES = saved_config.max_retries
+                                
+                                for attempt in range(STEP_RETRIES):
+                                    try:
+                                        payload = {
+                                            "video_path": os.path.abspath(vga_path),
+                                            "output_path": os.path.abspath(pdf_path),
+                                            "threshold": 0.02,
+                                            "min_time_gap": 3.0
+                                        }
+                                        resp = requests.post(api_url, json=payload, timeout=900)
                                         
-                                except Exception as e:
-                                    if attempt < STEP_RETRIES - 1:
-                                        logger.error(f"PPT Request Error: {e}")
-                                        self._update_task(task_id, message=f"PPT 服务响应慢，等待重试({attempt+1})...")
-                                        time.sleep(saved_config.retry_delay)
-                            
-                            if not ppt_success:
-                                error_msg = "PPT 生成失败"
-                                logger.warning(f"Task {task_id}: {error_msg}")
-                                self._update_task(task_id, status=TaskStatus.FAILED, 
-                                                message=error_msg, error=error_msg, speed=0)
-                                raise Exception(error_msg)
+                                        if resp.status_code == 200:
+                                            result = resp.json()
+                                            if result.get("status") == "success" and self._is_file_valid(pdf_path, min_size=1024):
+                                                ppt_success = True
+                                                logger.info(f"Task {task_id}: PPT 提取成功")
+                                                break
+                                        else:
+                                            logger.error(f"PPT Plugin Error ({resp.status_code}): {resp.text}")
+                                            
+                                    except Exception as e:
+                                        if attempt < STEP_RETRIES - 1:
+                                            logger.error(f"PPT Request Error: {e}")
+                                            self._update_task(task_id, message=f"PPT 服务响应慢，等待重试({attempt+1})...")
+                                            time.sleep(saved_config.retry_delay)
+                                
+                                if not ppt_success:
+                                    error_msg = "PPT 生成失败"
+                                    logger.warning(f"Task {task_id}: {error_msg}")
+                                    self._update_task(task_id, status=TaskStatus.FAILED, 
+                                                    message=error_msg, error=error_msg, speed=0)
+                                    raise Exception(error_msg)
                     
                     except Exception as e:
                         logger.error(f"Task {task_id}: PPT 提取异常 - {e}", exc_info=True)
-                        # 如果是必需的 PPT 提取失败，应该抛出异常
                         raise Exception(f"PPT 提取失败: {str(e)}")
                 
                 self._update_task(task_id, progress=ppt_end)
