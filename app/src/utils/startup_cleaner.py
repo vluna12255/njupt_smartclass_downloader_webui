@@ -5,6 +5,7 @@ import os
 import glob
 from pathlib import Path
 from .logger import get_logger
+from .config_manager import config_manager
 
 logger = get_logger('startup_cleaner')
 
@@ -21,7 +22,8 @@ class StartupCleaner:
         """
         self.root_dir = root_dir
         self.logs_dir = os.path.join(root_dir, "logs")
-        self.download_dir = os.path.join(root_dir, "SmartclassDownload")
+        configured_download_dir = (config_manager.get().download_dir or "").strip()
+        self.download_dir = configured_download_dir or os.path.join(root_dir, "SmartclassDownload")
     
     def clean_logs(self):
         """清理 logs/ 目录下的所有文件"""
