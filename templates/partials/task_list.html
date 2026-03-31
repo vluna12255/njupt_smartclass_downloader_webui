@@ -43,7 +43,7 @@
                 </span>
             </div>
 
-            {% if not is_install_task and task.status == 'running' and task.total_size > 0 %}
+            {% if not is_install_task and task.status == 'running' and task.total_size > 0 and task.speed > 0 %}
             <div class="mt-3 flex items-center gap-3">
                 <div class="flex-grow h-1.5 bg-gray-100 rounded-full overflow-hidden">
                     <div class="h-full bg-blue-500 rounded-full transition-all duration-300" 

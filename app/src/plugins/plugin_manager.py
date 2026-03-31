@@ -93,9 +93,19 @@ class PluginManager:
         self.env_init_lock = threading.Lock()
         self.running_ports = {} 
         self.on_uninstall_callback = None
+        self.on_startup_task_callback = None  # (plugin_name) -> task_id
+        self.main_server_url = ""  # 主服务地址，启动子进程时传入
     
     def set_uninstall_callback(self, callback):
         self.on_uninstall_callback = callback
+
+    def set_startup_task_callback(self, callback):
+        """注入启动任务回调：callback(plugin_name) 创建并返回 task_id"""
+        self.on_startup_task_callback = callback
+
+    def set_main_server_url(self, url: str):
+        """注入主服务器地址，供子进程回报启动状态使用"""
+        self.main_server_url = url
 
     def _get_venv_python(self, venv_path):
         return os.path.join(venv_path, "Scripts", "python.exe")
@@ -670,6 +680,11 @@ class PluginManager:
                 log_file = open(log_path, "a", encoding="utf-8")
                 cwd_path = os.path.join(self.plugins_dir, cfg["folder"])
 
+                # 将主服务地址注入子进程环境变量
+                proc_env = os.environ.copy()
+                if self.main_server_url:
+                    proc_env["MAIN_SERVER_URL"] = self.main_server_url
+
                 proc = subprocess.Popen(
                     cmd,
                     cwd=cwd_path, 
@@ -677,12 +692,21 @@ class PluginManager:
                     stderr=subprocess.STDOUT,
                     stdin=subprocess.PIPE,
                     startupinfo=startupinfo,
-                    creationflags=creationflags
+                    creationflags=creationflags,
+                    env=proc_env
                 )
                 log_file.close()
                 self.processes[plugin_name] = proc
-                self.running_ports[plugin_name] = runtime_port 
+                self.running_ports[plugin_name] = runtime_port
                 print(f"[{plugin_name}] 服务已启动 (PID: {proc.pid}, Port: {runtime_port})")
+
+                # 创建启动任务卡片（whisper/funasr 才有模型加载阶段）
+                if plugin_name in ("whisper", "funasr") and self.on_startup_task_callback:
+                    try:
+                        self.on_startup_task_callback(plugin_name)
+                    except Exception as _e:
+                        print(f"[{plugin_name}] 创建启动任务卡片失败: {_e}")
+
                 return True  # 返回 True 表示成功启动了新进程
             except Exception as e:
                 print(f"启动失败: {e}")

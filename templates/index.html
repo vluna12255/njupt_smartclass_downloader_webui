@@ -619,8 +619,14 @@
                     const pluginName = t.id.replace('install_', '');
                     checkPluginStatus(pluginName, pluginColorMap[pluginName] || 'indigo', false);
                 }
+                // startup_ 任务完成/失败时，在设置界面中刷新插件状态徽章
+                if (t.id && t.id.startsWith('startup_') && (t.status === 'completed' || t.status === 'failed')) {
+                    const pluginName = t.id.replace('startup_', '');
+                    const badge = document.getElementById(`plugin-status-badge-${pluginName}`);
+                    if (badge) checkPluginStatus(pluginName, pluginColorMap[pluginName] || 'indigo', false);
+                }
             } else if (msg.type === 'notification') {
-                showToast(msg.data && msg.data.message ? msg.data.message : msg.message || '');
+                // 已禁用额外弹窗通知
             }
         }
 
@@ -643,42 +649,74 @@
         }
 
         function buildTaskCardHTML(t) {
-            const isInstall = t.id && (t.id.includes('install') || (t.title && t.title.includes('安装')));
-            const statusCls = STATUS_CLASSES[t.status] || 'bg-gray-100 text-gray-600';
-            const statusTxt = t.status_text || STATUS_TEXT[t.status] || t.status;
-            const showProgress = !isInstall && t.status === 'running' && t.total_size > 0;
+            const isInstall  = t.id && (t.id.startsWith('install_')  || (t.title && t.title.includes('安装')));
+            const isStartup  = t.id && t.id.startsWith('startup_');
+            const statusCls  = STATUS_CLASSES[t.status] || 'bg-gray-100 text-gray-600';
+            const statusTxt  = t.status_text || STATUS_TEXT[t.status] || t.status;
+
+            // 下载进度条：仅普通下载任务且有总大小时显示
+            const showDlProgress = !isInstall && !isStartup && t.status === 'running' && t.total_size > 0 && t.speed > 0;
             const pct = t.total_size > 0 ? Math.round(t.downloaded_size / t.total_size * 100) : 0;
 
-            const glowHTML = isInstall && t.status === 'running'
+            // 启动进度条：已禁用
+            const showStartupProgress = false;
+            const startupPct = Math.min(100, Math.max(0, t.progress || 0));
+
+            // 光晕效果
+            const glowHTML = (isInstall || isStartup) && t.status === 'running'
                 ? `<div class="absolute top-0 right-0 -mt-4 -mr-4 w-24 h-24 bg-blue-50 rounded-full blur-2xl opacity-60 animate-pulse"></div>`
                 : '';
 
+            // 子标题行
             let sublineHTML = '';
             if (t.status === 'failed') {
-                sublineHTML = `<span class="text-xs text-red-500 font-medium truncate">❌ ${escHtml(t.error || '')}</span>`;
+                sublineHTML = `<span class="text-xs text-red-500 font-medium truncate">❌ ${escHtml(t.error || t.message || '')}</span>`;
             } else if (t.message) {
-                const prefix = isInstall ? `<span class="text-indigo-500">>></span> ` : '';
+                let prefix = '';
+                if (isInstall) prefix = `<span class="text-indigo-500">>></span> `;
+                if (isStartup) prefix = '';
                 sublineHTML = `<span class="text-xs text-gray-500 font-mono truncate transition-all">${prefix}${escHtml(t.message)}</span>`;
             }
 
-            const progressHTML = showProgress ? `
+            // 图标
+            let iconHTML = '';
+            if (isStartup) {
+                iconHTML = '';
+            } else if (isInstall) {
+                iconHTML = `<div class="shrink-0 w-7 h-7 rounded-lg bg-blue-100 flex items-center justify-center text-blue-600">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+                </div>`;
+            }
+
+            // 下载进度条
+            const dlProgressHTML = showDlProgress ? `
                 <div class="mt-3 flex items-center gap-3">
                     <div class="flex-grow h-1.5 bg-gray-100 rounded-full overflow-hidden">
                         <div class="h-full bg-blue-500 rounded-full transition-all duration-300" style="width:${pct}%"></div>
                     </div>
                     <div class="text-[10px] text-gray-400 font-mono whitespace-nowrap flex items-center gap-2">
                         <span>${escHtml(t.downloaded_str||'')}/${escHtml(t.total_size_str||'')}</span>
-                        <span class="w-px h-3 bg-gray-200"></span>
-                        <span class="text-green-600 font-bold">${escHtml(t.speed_str||'')}</span>
-
+                        ${t.speed > 0 ? `<span class="w-px h-3 bg-gray-200"></span><span class="text-green-600 font-bold">${escHtml(t.speed_str||'')}</span>` : ''}
                     </div>
                 </div>` : '';
+
+            // 启动进度条（模型加载阶段）
+            const startupProgressHTML = showStartupProgress ? `
+                <div class="mt-3 flex items-center gap-3">
+                    <div class="flex-grow h-1.5 bg-violet-100 rounded-full overflow-hidden">
+                        <div class="h-full bg-violet-500 rounded-full transition-all duration-500" style="width:${startupPct}%"></div>
+                    </div>
+                    <span class="text-[10px] font-mono text-violet-500 whitespace-nowrap">${startupPct}%</span>
+                </div>` : '';
+
+            const progressHTML = dlProgressHTML + startupProgressHTML;
 
             return `
             <div class="bg-white px-5 py-4 rounded-xl shadow-sm border border-gray-200 relative overflow-hidden task-card" data-task-id="${escHtml(t.id)}">
                 ${glowHTML}
                 <div class="flex justify-between items-start relative z-10">
                     <div class="flex items-center gap-3 overflow-hidden mr-4 flex-1">
+                        ${iconHTML}
                         <div class="flex flex-col min-w-0">
                             <span class="text-sm font-bold text-gray-800 truncate" title="${escHtml(t.title)}">${escHtml(t.title)}</span>
                             ${sublineHTML}
@@ -709,6 +747,10 @@
                 return;
             }
             const sorted = tasks.slice().sort((a, b) => {
+                // startup_ 任务置顶（模型加载中最重要），其次 install_，再按状态排序
+                const typeOrder = id => id && id.startsWith('startup_') ? 0 : id && id.startsWith('install_') ? 1 : 2;
+                const tDiff = typeOrder(a.id) - typeOrder(b.id);
+                if (tDiff !== 0) return tDiff;
                 const order = { running:0, waiting:1, queued:2, failed:3, completed:4, cancelled:5 };
                 return (order[a.status]||9) - (order[b.status]||9);
             });
@@ -1034,8 +1076,10 @@
                     document.querySelectorAll('.video-card.selected').forEach(el => { el.classList.remove('selected'); el.querySelector('input').checked = false; });
                     updateDownloadBtn();
                     switchTab('tasks');
-                } else alert('错误: ' + result.msg);
-            } catch (error) { alert('网络请求失败'); }
+                } else {
+                    showToast('错误: ' + (result.msg || '未知错误'));
+                }
+            } catch (error) { showToast('网络请求失败'); }
         }
 
         function showToast(message) {
@@ -1338,7 +1382,7 @@
                         }
 
                     } else {
-                        alert("卸载失败: " + (data.msg || "未知错误"));
+                        showToast("卸载失败: " + (data.msg || "未知错误"));
                         if (btnUninstall) {
                             btnUninstall.disabled = false;
                             btnUninstall.innerText = "一键卸载";
@@ -1350,7 +1394,7 @@
                     }
                 } catch (e) {
                     console.error(e);
-                    alert("请求超时或服务未响应，请稍后刷新页面查看");
+                    showToast("请求超时或服务未响应，请稍后刷新页面查看");
                     if (btnUninstall) btnUninstall.innerText = "请刷新查看";
                 }
             }, 0);
@@ -1370,12 +1414,12 @@
                     document.getElementById('settings-modal').classList.add('hidden');
                     switchTab('tasks');
                 } else {
-                    alert("安装失败: " + (data.msg || "未知错误"));
+                    showToast("安装失败: " + (data.msg || "未知错误"));
                     btn.disabled = false;
                     btn.innerText = "一键安装";
                 }
             } catch(e) {
-                alert("请求错误: 请检查后端服务是否正常");
+                showToast("请求错误: 请检查后端服务是否正常");
                 btn.disabled = false;
                 btn.innerText = "一键安装";
             }

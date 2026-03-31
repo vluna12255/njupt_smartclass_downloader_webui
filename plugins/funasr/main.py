@@ -49,6 +49,45 @@ task_manager = get_task_manager(storage_dir=os.path.join(BASE_DIR, "tasks"), max
 
 REMOTE_MODEL_ID = "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
 
+# ── 主进程回报接口（模块级，供启动阶段使用）──
+MAIN_SERVER_URL = os.environ.get("MAIN_SERVER_URL", "")
+PLUGIN_NAME = "funasr"
+
+# ── 全局状态对象类定义 ──
+class ServiceStatus:
+    """FunASR 服务状态管理"""
+    def __init__(self, device: str):
+        self.lock = threading.Lock()
+        self.phase = "initializing"  # initializing, downloading, loading, ready, failed
+        self.progress = 0.0
+        self.message = ""
+        self.error = ""
+        self.timestamp = None
+        self.device = device
+
+    def update(self, phase: str = None, message: str = "", progress: float = None, error: str = ""):
+        with self.lock:
+            if phase:
+                self.phase = phase
+            if message:
+                self.message = message
+            if progress is not None:
+                self.progress = progress
+            if error:
+                self.error = error
+            self.timestamp = time.time()
+
+    def to_dict(self):
+        with self.lock:
+            return {
+                "phase": self.phase,
+                "progress": self.progress,
+                "message": self.message,
+                "error": self.error,
+                "timestamp": self.timestamp,
+                "device": self.device,
+            }
+
 # 详细的 CUDA 检测
 logger.info("=" * 50)
 logger.info("CUDA 环境检测:")
@@ -68,16 +107,43 @@ logger.info(f"  最终选择设备: {DEVICE}")
 logger.info("=" * 50)
 logger.info(f"正在初始化模型... (当前检测设备: {DEVICE})")
 
+# 在 DEVICE 定义后创建全局状态对象
+global_status = ServiceStatus(DEVICE)
+
+def _report_to_main(phase: str, message: str, progress: float = -1, success: bool = True):
+    """向主进程汇报启动状态"""
+    if not MAIN_SERVER_URL:
+        return
+    try:
+        import requests as _req
+        payload = {"phase": phase, "message": message, "success": success}
+        if progress >= 0:
+            payload["progress"] = progress
+        _req.post(
+            f"{MAIN_SERVER_URL.rstrip('/')}/api/plugins/{PLUGIN_NAME}/startup_report",
+            json=payload, timeout=5
+        )
+    except Exception:
+        pass
+
 
 def check_and_download_model(local_dir, remote_id):
     if not os.path.exists(local_dir) or not os.listdir(local_dir):
         logger.info(f"检测到本地模型缺失: {local_dir}")
         logger.info(f"开始从 ModelScope 下载模型 ({remote_id})...")
+        global_status.update(phase="downloading", message="正在从 ModelScope 下载模型，首次启动可能需要数分钟...", progress=10)
+        _report_to_main("downloading", "正在从 ModelScope 下载模型，首次启动可能需要数分钟...", progress=10)
         snapshot_download(remote_id, local_dir=local_dir)
+        global_status.update(phase="downloading", message="模型下载完成", progress=60)
+        _report_to_main("downloading", "模型下载完成", progress=60)
     else:
         logger.info(f"检测到本地模型已存在: {local_dir}")
+        global_status.update(phase="downloading", message="本地模型已存在，跳过下载", progress=60)
+        _report_to_main("downloading", "本地模型已存在，跳过下载", progress=60)
 
 # 执行检查
+global_status.update(phase="initializing", message="FunASR 服务启动中...", progress=5)
+_report_to_main("downloading", "FunASR 服务启动中...", progress=5)
 check_and_download_model(MODEL_SIZE, REMOTE_MODEL_ID)
 
 # 设备配置
@@ -89,6 +155,8 @@ model = None
 
 try:
     logger.info(f"--- 正在加载模型到设备: {device} ---")
+    global_status.update(phase="loading", message=f"正在加载 FunASR 模型到 {device.upper()}，请稍候...", progress=65)
+    _report_to_main("loading", f"正在加载 FunASR 模型到 {device.upper()}，请稍候...", progress=65)
     model = AutoModel(
         model=MODEL_SIZE,
         trust_remote_code=True,
@@ -101,7 +169,9 @@ try:
     if model is None:
         raise Exception("模型加载返回 None")
     logger.info("✓ FunASR 模型加载完成，服务准备就绪")
-    
+    global_status.update(phase="ready", message=f"FunASR 服务已就绪（{device.upper()}）", progress=100)
+    _report_to_main("ready", f"FunASR 服务已就绪（{device.upper()}）", progress=100)
+
     # 验证模型是否真的在 GPU 上
     if device == "cuda":
         try:
@@ -110,13 +180,15 @@ try:
             logger.info(f"  GPU 显存缓存: {torch.cuda.memory_reserved(0) / 1024**3:.2f} GB")
         except Exception as e:
             logger.warning(f"  警告: 无法获取 GPU 信息 - {e}")
-            
+
 except Exception as e:
     logger.error(f"✗ 严重错误: FunASR 模型加载失败 - {e}")
     logger.error("✗ 服务将不会启动，请检查:")
     logger.error("  1. 模型文件是否完整")
     logger.error("  2. 显存/内存是否充足")
     logger.error("  3. 依赖库是否正确安装")
+    global_status.update(phase="failed", message=f"FunASR 模型加载失败: {e}", error=str(e), progress=0)
+    _report_to_main("failed", f"FunASR 模型加载失败: {e}", progress=0, success=False)
     # 模型加载失败时，阻止服务启动
     raise RuntimeError(f"FunASR 模型加载失败: {e}")
 
@@ -272,6 +344,11 @@ def _do_transcribe_work(task_id: str, temp_path: str):
         
         # 强制垃圾回收
         gc.collect()
+
+@app.get("/status")
+async def get_status():
+    """获取 FunASR 服务状态"""
+    return JSONResponse(content=global_status.to_dict())
 
 @app.post("/transcribe")
 async def transcribe(file: UploadFile = File(...)):

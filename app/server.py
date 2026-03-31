@@ -120,6 +120,8 @@ async def lifespan(app: FastAPI):
     
     task_manager.set_plugin_manager(plugin_manager)
     plugin_manager.set_uninstall_callback(task_manager.abort_plugin_task)
+    plugin_manager.set_startup_task_callback(task_manager.add_startup_task)
+    plugin_manager.set_main_server_url(f"http://127.0.0.1:{SERVER_PORT}")
     
     if current_cfg.auto_login:
         session_manager.perform_auto_login()

@@ -7,6 +7,7 @@ import shutil
 import json
 import torch
 import uuid
+import time
 from datetime import timedelta
 import ast
 import argparse
@@ -30,6 +31,65 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR_PATH = os.path.join(BASE_DIR, MODEL_SIZE)
 TEMP_DIR = os.path.join(BASE_DIR, "server_temp")
 
+# ── 主进程回报接口 ──
+MAIN_SERVER_URL = os.environ.get("MAIN_SERVER_URL", "")
+PLUGIN_NAME = "whisper"
+
+# ── 全局状态对象类定义 ──
+class ServiceStatus:
+    """Whisper 服务状态管理"""
+    def __init__(self, device: str, compute_type: str):
+        self.lock = threading.Lock()
+        self.phase = "initializing"  # initializing, downloading, loading, ready, failed
+        self.progress = 0.0
+        self.message = ""
+        self.error = ""
+        self.timestamp = None
+        self.device = device
+        self.compute_type = compute_type
+    
+    def update(self, phase: str = None, message: str = "", progress: float = None, error: str = ""):
+        """更新状态"""
+        with self.lock:
+            if phase:
+                self.phase = phase
+            if message:
+                self.message = message
+            if progress is not None:
+                self.progress = progress
+            if error:
+                self.error = error
+            self.timestamp = time.time()
+    
+    def to_dict(self):
+        """转换为字典"""
+        with self.lock:
+            return {
+                "phase": self.phase,
+                "progress": self.progress,
+                "message": self.message,
+                "error": self.error,
+                "timestamp": self.timestamp,
+                "device": self.device,
+                "compute_type": self.compute_type
+            }
+
+def _report_to_main(phase: str, message: str, progress: float = -1, success: bool = True):
+    """向主进程汇报启动状态"""
+    if not MAIN_SERVER_URL:
+        return
+    try:
+        import requests as _rq
+        payload = {"phase": phase, "message": message, "success": success}
+        if progress >= 0:
+            payload["progress"] = progress
+        _rq.post(
+            f"{MAIN_SERVER_URL.rstrip('/')}/api/plugins/{PLUGIN_NAME}/startup_report",
+            json=payload, timeout=5
+        )
+    except Exception:
+        pass
+
 # 详细的 CUDA 检测
 print("=" * 50)
 print("CUDA 环境检测:")
@@ -51,37 +111,83 @@ print(f"  最终选择设备: {DEVICE}")
 print(f"  计算类型: {COMPUTE_TYPE}")
 print("=" * 50)
 
+# 在 DEVICE 和 COMPUTE_TYPE 定义后创建全局状态对象
+global_status = ServiceStatus(DEVICE, COMPUTE_TYPE)
+
 print(f"正在初始化模型... (当前检测设备: {DEVICE})")
 
 global_model = None
 
+def _validate_model_files(model_path: str) -> bool:
+    """校验模型目录中的关键文件是否完整（model.bin 必须存在且 > 2000MB）"""
+    model_bin = os.path.join(model_path, "model.bin")
+    if not os.path.exists(model_bin):
+        return False
+    if os.path.getsize(model_bin) < 2000 * 1024 * 1024: 
+        return False
+    return True
+0
+
 def load_model_logic():
-    print(f"--- 正在启动服务，开始检查模型文件 ---")
+    print(f"正在启动服务，开始检查模型文件 ---")
     print(f"--- 目标模型: {MODEL_SIZE} ---")
     print(f"--- 存储目录: {MODEL_DIR_PATH} ---")
-    actual_model_path = download_model(
-        MODEL_SIZE,
-        output_dir=MODEL_DIR_PATH
-    )
 
+    # 检测模型文件完整性，不完整则清理后重新下载
+    if os.path.exists(MODEL_DIR_PATH) and not _validate_model_files(MODEL_DIR_PATH):
+        print(f"--- 检测到模型文件不完整（model.bin 缺失或过小），正在清理残留目录以重新下载 ---")
+        global_status.update(phase="downloading", message="模型文件不完整，正在重新下载...", progress=1)
+        _report_to_main("downloading", "模型文件不完整，正在重新下载...", progress=1)
+        try:
+            import shutil as _shutil
+            _shutil.rmtree(MODEL_DIR_PATH)
+            print(f"--- 已清理目录: {MODEL_DIR_PATH} ---")
+        except Exception as clean_err:
+            print(f"--- 清理目录失败: {clean_err}，将尝试继续下载 ---")
+
+    # ── 阶段1：下载模型 ──
+    global_status.update(phase="downloading", message=f"正在下载模型 {MODEL_SIZE}...", progress=5)
+    _report_to_main("downloading", f"正在下载模型 {MODEL_SIZE}...", progress=5)
+    try:
+        actual_model_path = download_model(
+            MODEL_SIZE,
+            output_dir=MODEL_DIR_PATH
+        )
+    except Exception as dl_err:
+        err_msg = f"模型下载失败: {dl_err}"
+        print(f"严重错误: {err_msg}")
+        global_status.update(phase="failed", message=err_msg, error=err_msg, progress=0)
+        _report_to_main("failed", err_msg, progress=0, success=False)
+        raise RuntimeError(err_msg) from dl_err
+
+    # ── 阶段2：加载模型到设备 ──
     print(f"--- 正在加载模型到设备: {DEVICE}, 计算类型: {COMPUTE_TYPE} ---")
-    model = WhisperModel(
-        actual_model_path,
-        device=DEVICE,
-        compute_type=COMPUTE_TYPE
-    )
+    global_status.update(phase="loading", message=f"正在加载模型到 {DEVICE.upper()}...", progress=80)
+    _report_to_main("loading", f"正在加载模型到 {DEVICE.upper()}...", progress=80)
+    try:
+        model = WhisperModel(
+            actual_model_path,
+            device=DEVICE,
+            compute_type=COMPUTE_TYPE
+        )
+    except Exception as load_err:
+        err_msg = f"模型加载失败: {load_err}"
+        print(f"严重错误: {err_msg}")
+        global_status.update(phase="failed", message=err_msg, error=err_msg, progress=0)
+        _report_to_main("failed", err_msg, progress=0, success=False)
+        raise RuntimeError(err_msg) from load_err
+
     print("--- 模型加载完成 ---")
-    
+
     # 验证模型是否真的在 GPU 上
     if DEVICE == "cuda":
         try:
-            # 测试 CUDA 是否真的在工作
             print(f"--- 验证 GPU 使用情况 ---")
             print(f"  当前 GPU 显存使用: {torch.cuda.memory_allocated(0) / 1024**3:.2f} GB")
             print(f"  GPU 显存缓存: {torch.cuda.memory_reserved(0) / 1024**3:.2f} GB")
         except Exception as e:
             print(f"  警告: 无法获取 GPU 信息 - {e}")
-    
+
     return model
 
 @asynccontextmanager
@@ -114,8 +220,12 @@ async def lifespan(app: FastAPI):
     
     try:
         global_model = load_model_logic()
+        global_status.update(phase="ready", message=f"Whisper 服务已就绪（{DEVICE.upper()}）", progress=100)
+        _report_to_main("ready", f"Whisper 服务已就绪（{DEVICE.upper()}）", progress=100)
     except Exception as e:
         print(f"严重错误: 模型加载失败 - {e}")
+        global_status.update(phase="failed", message=f"Whisper 模型加载失败: {e}", error=str(e), progress=0)
+        _report_to_main("failed", f"Whisper 模型加载失败: {e}", progress=0, success=False)
     yield 
 
     print("正在关闭服务，清理资源...")
@@ -131,6 +241,12 @@ task_manager = get_task_manager(storage_dir=os.path.join(BASE_DIR, "tasks"), max
 
 SKIP_KEYWORDS = ["打赏支持明镜与点点栏目"]
 os.makedirs(TEMP_DIR, exist_ok=True)
+
+# ── 状态查询端点 ──
+@app.get("/status")
+async def get_status():
+    """获取 Whisper 服务状态"""
+    return JSONResponse(content=global_status.to_dict())
 
 def format_timestamp(seconds: float):
     td = timedelta(seconds=seconds)

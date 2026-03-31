@@ -1,5 +1,5 @@
 """插件管理相关路由"""
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 import time
 
@@ -97,6 +97,25 @@ def setup_plugin_routes(plugin_manager, task_manager):
         except Exception as e:
             return JSONResponse({"status": "error", "msg": f"服务端异常: {str(e)}"}, status_code=500)
     
+    @router.post("/api/plugins/{plugin_name}/startup_report")
+    async def plugin_startup_report(plugin_name: str, request: Request):
+        """接收插件进程回报的启动状态，更新任务卡片"""
+        allowed = {"whisper", "funasr"}
+        if plugin_name not in allowed:
+            return JSONResponse({"status": "error", "msg": "未知插件"}, status_code=400)
+        try:
+            body = await request.json()
+            phase = body.get("phase", "")
+            message = body.get("message", "")
+            progress = float(body.get("progress", -1))
+            success = bool(body.get("success", True))
+            logger.info(f"[startup_report] {plugin_name} phase={phase} msg={message}")
+            task_manager.update_startup_task(plugin_name, phase, message, progress, success)
+            return {"status": "ok"}
+        except Exception as e:
+            logger.error(f"startup_report error: {e}", exc_info=True)
+            return JSONResponse({"status": "error", "msg": str(e)}, status_code=500)
+
     @router.get("/api/plugins/dependency_check")
     async def check_dependencies():
         return {

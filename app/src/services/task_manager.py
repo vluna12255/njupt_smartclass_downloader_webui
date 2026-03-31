@@ -5,6 +5,7 @@ import os
 import glob
 import requests
 import subprocess
+import shutil
 from typing import List, Dict, Optional, Callable
 from concurrent.futures import ThreadPoolExecutor, Future
 
@@ -47,17 +48,238 @@ class TaskManager:
         self.download_sem = threading.Semaphore(max_download_concurrent)
         self.whisper_sem = threading.Semaphore(max_whisper_concurrent)
         self.ppt_sem = threading.Semaphore(max_ppt_concurrent)
+
+        # 插件冷启动/首次模型下载互斥，避免并发任务状态错乱
+        self.plugin_boot_locks = {
+            "whisper": threading.Lock(),
+            "funasr": threading.Lock(),
+        }
         
         self.download_service = DownloadService()
         self.transcribe_service = TranscribeService()
         self.ppt_service = None
-        
+        self.project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
+        )
+
+        # 首次启动模型下载进度估算（用于任务列表展示）
+        self.model_size_estimates = {
+            "whisper": int(3.3 * 1024 * 1024 * 1024),   # large-v3 约 3.3GB
+            "funasr": int(1.2 * 1024 * 1024 * 1024),    # paraformer + vad + punc 约 1.2GB
+        }
+        self.model_paths = {
+            "whisper": os.path.join("plugins", "whisper", "large-v3"),
+            "funasr": os.path.join("plugins", "funasr", "paraformer-zh"),
+        }
+
         self._clean_residuals()
     
     def set_plugin_manager(self, plugin_manager):
         """注入插件管理器"""
         self.ppt_service = PPTService(plugin_manager)
-    
+
+    # ── 插件启动任务卡片 ──────────────────────────────────────────────
+
+    def add_startup_task(self, plugin_name: str) -> str:
+        """
+        在插件进程启动时创建一张「服务启动中」任务卡片。
+        供 plugin_manager 的 on_startup_task_callback 使用。
+        启动后台轮询线程定期查询插件的状态端点，同时监控进程存活状态。
+        返回 task_id 供后续 update_startup_task 匹配。
+        """
+        task_id = f"startup_{plugin_name}"
+        title_map = {
+            "whisper": "Whisper 服务启动",
+            "funasr": "FunASR 服务启动",
+        }
+        with self.lock:
+            # 若已有同名任务且处于活跃态，不重建
+            existing = self.tasks.get(task_id)
+            if existing and existing.status in [TaskStatus.RUNNING, TaskStatus.QUEUED, TaskStatus.WAITING]:
+                return task_id
+
+            self.tasks[task_id] = TaskInfo(
+                id=task_id,
+                title=title_map.get(plugin_name, f"{plugin_name} 服务启动"),
+                status=TaskStatus.RUNNING,
+                message="服务启动中，正在准备模型...",
+                progress=0.0,
+                current_action="启动服务",
+            )
+        self._update_task(task_id, status=TaskStatus.RUNNING)  # 触发广播
+        logger.info(f"[startup_task] 创建插件启动卡片: {task_id}")
+
+        # ── 后台轮询：定期查询插件状态 + 进程存活监控 ──
+        def _poll_and_watch():
+            try:
+                from ..plugins.plugin_manager import plugin_manager as _pm
+                
+                # 等进程对象出现
+                proc = None
+                for _ in range(30):  # 最多等 3 秒
+                    proc = _pm.processes.get(plugin_name)
+                    if proc is not None:
+                        break
+                    time.sleep(0.1)
+
+                if proc is None:
+                    logger.warning(f"[startup_task] 未找到 {plugin_name} 进程对象，监控退出")
+                    return
+
+                # 获取服务 URL
+                service_url = _pm.get_service_url(plugin_name)
+                if not service_url:
+                    logger.warning(f"[startup_task] 无法获取 {plugin_name} 服务 URL")
+                    return
+
+                status_url = f"{service_url}/status"
+                poll_interval = 2  # 每 2 秒轮询一次
+                max_poll_retries = 300  # 最多轮询 10 分钟
+
+                for poll_count in range(max_poll_retries):
+                    # 检查进程是否仍在运行
+                    if proc.poll() is not None:
+                        # 进程已退出
+                        with self.lock:
+                            task = self.tasks.get(task_id)
+                            already_done = task is None or task.status in [
+                                TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED
+                            ]
+
+                        if not already_done:
+                            exit_code = proc.returncode
+                            err_msg = f"{plugin_name} 进程意外退出 (exit_code={exit_code})，请查看日志"
+                            logger.error(f"[startup_task] {err_msg}")
+                            self._update_task(
+                                task_id,
+                                status=TaskStatus.FAILED,
+                                message=err_msg,
+                                error=err_msg,
+                                speed=0,
+                            )
+                        return
+
+                    # 轮询查询服务状态
+                    try:
+                        resp = requests.get(status_url, timeout=3)
+                        if resp.status_code == 200:
+                            status_data = resp.json()
+                            phase = status_data.get("phase", "")
+                            message = status_data.get("message", "")
+                            progress = status_data.get("progress", 0.0)
+                            error = status_data.get("error", "")
+
+                            # 根据 phase 更新任务卡片
+                            if self._apply_startup_phase_update(
+                                task_id=task_id,
+                                plugin_name=plugin_name,
+                                phase=phase,
+                                message=message,
+                                progress=progress,
+                                error=error,
+                            ):
+                                return
+                    except requests.RequestException as e:
+                        logger.debug(f"[startup_task] 轮询 {plugin_name} 状态失败 (尝试 {poll_count+1}): {e}")
+
+                    time.sleep(poll_interval)
+
+                # 轮询超时
+                logger.warning(f"[startup_task] 轮询 {plugin_name} 状态超时")
+                self._update_task(
+                    task_id,
+                    status=TaskStatus.FAILED,
+                    message=f"{plugin_name} 启动超时",
+                    error="轮询状态超时",
+                    speed=0,
+                )
+
+            except Exception as ex:
+                logger.debug(f"[startup_task] 轮询监控线程异常: {ex}")
+
+        t = threading.Thread(target=_poll_and_watch, daemon=True,
+                             name=f"startup_poll_{plugin_name}")
+        t.start()
+
+        return task_id
+
+    def update_startup_task(self, plugin_name: str, phase: str, message: str,
+                            progress: float = -1, success: bool = True):
+        """
+        接收插件进程回报的启动状态，更新对应任务卡片。
+        【备选方案】当轮询失败时使用此方法。
+        phase 取值：
+          - "initializing" : 启动中
+          - "downloading" : 模型下载中
+          - "loading"     : 模型加载中
+          - "ready"       : 服务就绪（转为 COMPLETED）
+          - "failed"      : 启动失败（转为 FAILED）
+        """
+        task_id = f"startup_{plugin_name}"
+
+        with self.lock:
+            if task_id not in self.tasks:
+                logger.warning(f"[startup_task] 收到报告但任务不存在，补建卡片: {task_id}")
+                self.tasks[task_id] = TaskInfo(
+                    id=task_id,
+                    title=f"{plugin_name} 服务启动",
+                    status=TaskStatus.RUNNING,
+                    message=message,
+                    progress=max(progress, 0.0),
+                    current_action="启动服务",
+                )
+
+        error = message if (not success or phase == "failed") else ""
+        self._apply_startup_phase_update(
+            task_id=task_id,
+            plugin_name=plugin_name,
+            phase=phase,
+            message=message,
+            progress=(progress if progress >= 0 else None),
+            error=error,
+            source="HTTP回报"
+        )
+
+    def _apply_startup_phase_update(self, task_id: str, plugin_name: str, phase: str,
+                                    message: str, progress: Optional[float],
+                                    error: str = "", source: str = "轮询") -> bool:
+        """统一处理插件启动 phase 到任务卡片的映射；返回 True 表示已进入终态。"""
+        kwargs: dict = {"message": message or f"{plugin_name} 服务启动中..."}
+
+        if progress is not None:
+            kwargs["progress"] = progress
+
+        if phase == "failed":
+            kwargs["status"] = TaskStatus.FAILED
+            kwargs["error"] = error or message or f"{plugin_name} 启动失败"
+            kwargs["speed"] = 0
+            self._update_task(task_id, **kwargs)
+            logger.error(f"[startup_task] 插件 {plugin_name} 启动失败（{source}）: {kwargs['error']}")
+            return True
+
+        if phase == "ready":
+            kwargs["status"] = TaskStatus.COMPLETED
+            kwargs["progress"] = 100.0
+            kwargs["speed"] = 0
+            self._update_task(task_id, **kwargs)
+            logger.info(f"[startup_task] 插件 {plugin_name} 启动成功（{source}）")
+            return True
+
+        # 运行中阶段映射
+        current_action = "启动服务"
+        if phase == "downloading":
+            current_action = "下载模型"
+        elif phase == "loading":
+            current_action = "加载模型"
+        elif phase == "initializing":
+            current_action = "启动服务"
+
+        kwargs["current_action"] = current_action
+        self._update_task(task_id, **kwargs)
+        return False
+
+    # ── 插件启动任务卡片 END ──────────────────────────────────────────
+
     def _clean_residuals(self):
         """启动后台清理线程"""
         threading.Thread(target=self._clean_worker, daemon=True).start()
@@ -144,6 +366,121 @@ class TaskManager:
         self.futures[final_task_id] = future
         return True
     
+    def _get_model_dir_size(self, plugin_name: str) -> int:
+        """统计模型目录大小（字节）"""
+        rel_path = self.model_paths.get(plugin_name)
+        if not rel_path:
+            return 0
+
+        model_dir = os.path.join(self.project_root, rel_path)
+        if not os.path.exists(model_dir):
+            return 0
+
+        total_size = 0
+        for root, _, files in os.walk(model_dir):
+            for file_name in files:
+                file_path = os.path.join(root, file_name)
+                try:
+                    total_size += os.path.getsize(file_path)
+                except OSError:
+                    continue
+        return total_size
+
+    def _create_model_download_task(self, parent_task_id: str, plugin_name: str) -> str:
+        """创建模型下载子任务"""
+        model_task_id = f"{parent_task_id}_model_{plugin_name}"
+        estimate = self.model_size_estimates.get(plugin_name, 1)
+
+        with self.lock:
+            if model_task_id in self.tasks:
+                existing = self.tasks[model_task_id]
+                if existing.status in [TaskStatus.RUNNING, TaskStatus.QUEUED, TaskStatus.WAITING]:
+                    return model_task_id
+
+            self.tasks[model_task_id] = TaskInfo(
+                id=model_task_id,
+                title=f"模型下载: {plugin_name}",
+                status=TaskStatus.RUNNING,
+                message="准备下载模型...",
+                total_size=estimate,
+                downloaded_size=0,
+                speed=0,
+                progress=0.0,
+                current_action="下载模型"
+            )
+
+        self._update_task(model_task_id, status=TaskStatus.RUNNING)
+        return model_task_id
+
+    def _monitor_model_download_task(self, model_task_id: str, plugin_name: str, stop_event: threading.Event):
+        """轮询模型目录大小并更新下载进度"""
+        estimate = self.model_size_estimates.get(plugin_name, 1)
+        last_size = 0
+        last_t = time.time()
+        smooth_speed = 0.0
+
+        while not stop_event.is_set():
+            current_size = self._get_model_dir_size(plugin_name)
+            current_t = time.time()
+            delta_t = max(current_t - last_t, 1e-3)
+            instant_speed = max(0.0, (current_size - last_size) / delta_t)
+
+            if smooth_speed == 0.0:
+                smooth_speed = instant_speed
+            else:
+                smooth_speed = 0.25 * instant_speed + 0.75 * smooth_speed
+
+            shown_downloaded = min(current_size, estimate)
+            progress = min((shown_downloaded / estimate) * 100, 95.0) if estimate > 0 else 0.0
+            msg = f"正在下载 {plugin_name} 模型..." if current_size > 0 else f"正在初始化 {plugin_name} 模型下载..."
+
+            self._update_task(
+                model_task_id,
+                status=TaskStatus.RUNNING,
+                message=msg,
+                current_action="下载模型",
+                total_size=estimate,
+                downloaded_size=shown_downloaded,
+                speed=smooth_speed,
+                progress=progress,
+            )
+
+            last_size = current_size
+            last_t = current_t
+            stop_event.wait(1.0)
+
+    def _finish_model_download_task(self, model_task_id: Optional[str], plugin_name: str, success: bool, error_msg: str = ""):
+        """收尾模型下载子任务状态"""
+        if not model_task_id:
+            return
+
+        estimate = self.model_size_estimates.get(plugin_name, 1)
+        downloaded = min(self._get_model_dir_size(plugin_name), estimate)
+
+        if success:
+            self._update_task(
+                model_task_id,
+                status=TaskStatus.COMPLETED,
+                message="模型下载完成",
+                current_action="完成",
+                total_size=estimate,
+                downloaded_size=max(downloaded, estimate),
+                speed=0,
+                progress=100.0,
+                error=""
+            )
+        else:
+            self._update_task(
+                model_task_id,
+                status=TaskStatus.FAILED,
+                message=error_msg or "模型下载失败",
+                current_action="失败",
+                total_size=estimate,
+                downloaded_size=downloaded,
+                speed=0,
+                error=error_msg or "模型下载失败"
+            )
+
     def get_all_tasks(self) -> List[TaskInfo]:
         """获取所有任务列表"""
         with self.lock:
@@ -672,22 +1009,33 @@ class TaskManager:
             
             # 本地自动唤醒逻辑
             if "127.0.0.1" in whisper_url or "localhost" in whisper_url:
+                boot_lock = self.plugin_boot_locks.get(target_plugin_name)
+                boot_lock_acquired = False
+
                 try:
                     from ..plugins.plugin_manager import plugin_manager
-                    
+
+                    # 同一插件的冷启动串行化：其余任务保持等待资源态
+                    if boot_lock:
+                        self._update_task(
+                            task_id,
+                            status=TaskStatus.WAITING,
+                            current_action="启动服务",
+                            message=f"等待 {target_plugin_name} 初始化资源..."
+                        )
+                        boot_lock.acquire()
+                        boot_lock_acquired = True
+
                     # 检查是否已安装（不检查运行状态，避免 HTTP 请求）
                     status = plugin_manager.get_plugin_status(target_plugin_name, check_running=False)
                     if status["installed"]:
-                        # 检查是否首次启动（需要下载模型）
-                        is_first_run = plugin_manager.is_first_run(target_plugin_name)
-                        
-                        if is_first_run:
-                            self._update_task(task_id, message=f"正在唤醒 {target_plugin_name} (首次启动需下载模型，可能需要几分钟)...", 
-                                            current_action="启动服务")
-                        else:
-                            self._update_task(task_id, message=f"正在唤醒 {target_plugin_name}...", 
-                                            current_action="启动服务")
-                        
+                        self._update_task(
+                            task_id,
+                            status=TaskStatus.WAITING,
+                            message=f"正在唤醒 {target_plugin_name}...",
+                            current_action="启动服务"
+                        )
+
                         # 尝试启动服务，如果已在运行则跳过
                         start_result = plugin_manager.start_service(target_plugin_name)
                         if start_result:
@@ -699,7 +1047,7 @@ class TaskManager:
                                 if plugin_manager.get_plugin_status(target_plugin_name)["running"]:
                                     service_started = True
                                     break
-                            
+
                             if not service_started:
                                 raise Exception(f"{target_plugin_name} 服务启动超时")
                         else:
@@ -709,13 +1057,16 @@ class TaskManager:
                         logger.warning(f"Task {task_id}: {target_plugin_name} not installed, skipping.")
                         self._update_task(task_id, message=f"{target_plugin_name}未安装，跳过")
                         final_whisper_targets = []
-                    
+
                     running_url = plugin_manager.get_service_url(target_plugin_name)
                     if running_url:
                         logger.info(f"检测到本地插件运行于: {running_url}，覆盖配置地址。")
                         whisper_url = running_url
                 except Exception as e:
                     logger.error(f"插件管理器访问失败: {e}")
+                finally:
+                    if boot_lock and boot_lock_acquired:
+                        boot_lock.release()
             
             total_w_count = len(final_whisper_targets)
             if total_w_count > 0:
@@ -747,11 +1098,11 @@ class TaskManager:
                             raise Exception(f"{t_type} 音频转换失败: {e}")
                     
                     self._update_task(task_id, status=TaskStatus.WAITING, 
-                                    message=f"等待语音识别服务...")
+                                    message=f"等待处理服务...")
                     
                     with self.whisper_sem:
                         self._update_task(task_id, status=TaskStatus.RUNNING, 
-                                        message=f"{target_plugin_name} 正在识别 {t_type}...")
+                                        message=f"正在处理 {t_type}...")
                         
                         whisper_success = False
                         STEP_RETRIES = saved_config.max_retries
@@ -796,7 +1147,7 @@ class TaskManager:
                                         break
                                 
                                 if attempt < STEP_RETRIES - 1:
-                                    self._update_task(task_id, message=f"识别服务响应慢，等待重试({attempt+1})...")
+                                    self._update_task(task_id, message=f"服务响应慢，等待重试({attempt+1})...")
                                     time.sleep(saved_config.retry_delay)
                                 
                             except Exception as e:

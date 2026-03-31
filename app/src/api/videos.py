@@ -14,6 +14,41 @@ router = APIRouter()
 def setup_video_routes(templates: Jinja2Templates, session_manager, task_manager):
     """注册视频路由：POST /search, POST /batch_download"""
     
+    def _search_with_keyword(client, keyword, page_size_request, max_retries, session_manager_ref):
+        """用单个关键词变体抓取所有分页结果，返回视频列表"""
+        videos = []
+        current_page = 1
+        retry_count = 0
+        while True:
+            try:
+                condition = VideoSearchCondition(
+                    title_key=keyword,
+                    page_number=current_page,
+                    page_size=page_size_request
+                )
+                result = client.search_video(condition)
+                retry_count = 0
+                if not result or not result.videos:
+                    break
+                videos.extend(result.videos)
+                if len(result.videos) < page_size_request or len(videos) >= 500:
+                    break
+                current_page += 1
+            except Exception as e:
+                error_str = str(e)
+                if "302" in error_str and retry_count < max_retries:
+                    success, _ = session_manager_ref.perform_auto_login()
+                    if success:
+                        client = session_manager_ref.get_client()
+                        retry_count += 1
+                        continue
+                    else:
+                        break
+                else:
+                    logger.error(f"搜索关键词 '{keyword}' 失败: {error_str}")
+                    break
+        return videos
+
     @router.post("/search", response_class=HTMLResponse)
     async def search_video(request: Request, keyword: str = Form(""), page: int = Form(1)):
         keyword = keyword.strip()
@@ -35,54 +70,35 @@ def setup_video_routes(templates: Jinja2Templates, session_manager, task_manager
         if not client:
             return HTMLResponse('<div class="col-span-full text-center text-red-500 py-20"><p class="text-base font-medium">登录失效</p><p class="text-sm mt-2">请检查账号密码配置或重新登录</p></div>', status_code=401)
         
-        all_videos = []
-        current_page = 1
         page_size_request = 50
-        
-        logger.info(f"正在搜索关键词: {keyword}")
         max_retries = 2
-        retry_count = 0
-        
-        while True:
-            try:
-                condition = VideoSearchCondition(
-                    title_key=keyword,
-                    page_number=current_page,
-                    page_size=page_size_request
-                )
-                result = client.search_video(condition)
-                
-                retry_count = 0
-                if not result or not result.videos:
-                    break
-                
-                all_videos.extend(result.videos)
-                logger.debug(f"已获取第 {current_page} 页，本页 {len(result.videos)} 条，总计 {len(all_videos)} 条")
-                
-                if len(result.videos) < page_size_request or len(all_videos) >= 500:
-                    break
-                
-                current_page += 1
-                
-            except Exception as e:
-                error_str = str(e)
-                logger.warning(f"搜索第 {current_page} 页异常: {error_str}")
-                # 只在真正的认证错误时重试（302重定向或明确的认证失败）
-                # 移除"找不到视频数据列表"的判断，因为这可能只是搜索结果为空
-                if "302" in error_str and retry_count < max_retries:
-                    logger.info(f"检测到认证失效，重试认证 ({retry_count+1})...")
-                    success, msg = session_manager.perform_auto_login()
-                    if success:
-                        client = session_manager.get_client()
-                        retry_count += 1
-                        continue
-                    else:
-                        logger.error(f"重新认证失败: {msg}")
-                        break
-                else:
-                    # 其他错误直接退出，不重试
-                    logger.error(f"搜索失败: {error_str}")
-                    break
+
+        # 生成大小写变体：原始、全小写、全大写、首字母大写、每词首字母大写
+        variants_ordered = []
+        seen_variants = set()
+        for variant in [
+            keyword,
+            keyword.lower(),
+            keyword.upper(),
+            keyword.capitalize(),
+            keyword.title(),
+        ]:
+            if variant not in seen_variants:
+                seen_variants.add(variant)
+                variants_ordered.append(variant)
+
+        logger.info(f"正在搜索关键词: {keyword}，变体: {variants_ordered}")
+
+        seen_ids = set()
+        all_videos = []
+        for variant in variants_ordered:
+            variant_results = _search_with_keyword(
+                client, variant, page_size_request, max_retries, session_manager
+            )
+            for v in variant_results:
+                if v.id not in seen_ids:
+                    seen_ids.add(v.id)
+                    all_videos.append(v)
         
         logger.info(f"搜索完成: 关键词 '{keyword}' 共找到 {len(all_videos)} 个结果")
         
