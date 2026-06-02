@@ -1,0 +1,65 @@
+body { font-family: 'Plus Jakarta Sans', 'Inter', system-ui, -apple-system, sans-serif; }
+        
+        @keyframes blob {
+            0% { transform: translate(0px, 0px) scale(1); }
+            33% { transform: translate(30px, -50px) scale(1.1); }
+            66% { transform: translate(-20px, 20px) scale(0.9); }
+            100% { transform: translate(0px, 0px) scale(1); }
+        }
+        .animate-blob { animation: blob 7s infinite; }
+        .animation-delay-2000 { animation-delay: 2s; }
+        .animation-delay-4000 { animation-delay: 4s; }
+        
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
+
+        .video-card { 
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); 
+            border: 2px solid transparent; 
+        }
+        .video-card:hover { 
+            transform: translateY(-4px); 
+            box-shadow: 0 10px 20px -5px rgba(0, 0, 0, 0.1); 
+        }
+        .video-card.selected { 
+            border-color: #2563eb; 
+            background-color: #eff6ff; 
+            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25); 
+            transform: translateY(-2px) scale(1.01); 
+        }
+        .video-card.selected .check-icon { display: flex; }
+
+        .checkbox-card input:checked + div {
+            border-color: #3b82f6; background-color: #eff6ff; box-shadow: 0 0 0 1px #3b82f6;
+        }
+
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        .tab-btn.active {
+            background-color: #2563eb;
+            color: white;
+        }
+
+        /* 任务卡片悬浮：不使用 transition，避免 DOM 替换时触发闪烁 */
+        .task-card:hover {
+            border-color: #93c5fd;
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -1px rgba(0,0,0,0.04);
+        }
+
+/* 自定义滚动条样式，让界面更精致 */
+    .custom-scrollbar::-webkit-scrollbar {
+        width: 6px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-track {
+        background: transparent;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb {
+        background-color: #cbd5e1;
+        border-radius: 20px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+        background-color: #94a3b8;
+    }

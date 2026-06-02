@@ -1,0 +1,43 @@
+{% if videos is not none %}
+    {% if videos|length > 0 %}
+        {% for video in videos %}
+<div class="video-card bg-white rounded-lg shadow-md cursor-pointer relative overflow-hidden transition-all duration-200 hover:shadow-xl hover:-translate-y-1 group"
+     onclick="toggleSelection(this)">
+    
+    <input type="checkbox" name="video_ids" value="{{ video.id }}" class="hidden">
+    
+    <div class="check-icon hidden absolute top-2 right-2 bg-blue-500 text-white rounded-full p-1 shadow-lg z-10">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path></svg>
+    </div>
+
+    <div class="w-full aspect-video bg-gray-200">
+        {% if video.cover_url %}
+        <img src="{{ video.cover_url }}" draggable="false" class="w-full h-full object-cover">
+        {% else %}
+        <div class="w-full h-full flex items-center justify-center text-gray-400">无封面</div>
+        {% endif %}
+    </div>
+
+    <div class="p-3">
+        <h3 class="font-bold text-gray-800 text-sm line-clamp-1 mb-1" title="{{ video.course_name }} {{ video.teachers }}">
+            {{ video.course_name }}&nbsp;&nbsp;{{ video.teachers }}
+        </h3>
+        
+        <p class="text-xs text-gray-500 truncate font-mono">
+            {{ video.start_time.strftime('%Y-%m-%d %H:%M:%S') }}-{{ video.stop_time.strftime('%H:%M:%S') }}
+        </p>
+    </div>
+</div>
+        {% endfor %}
+    {% else %}
+<div class="col-span-full text-center text-gray-500 py-20 animate-fade-in">
+    <div class="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-4 mx-auto">
+        <svg class="w-8 h-8 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+        </svg>
+    </div>
+    <p class="text-base font-medium text-slate-600">未找到相关课程</p>
+    <p class="text-sm text-slate-400 mt-2">请尝试其他关键词</p>
+</div>
+    {% endif %}
+{% endif %}

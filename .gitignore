@@ -1,0 +1,64 @@
+# Editor and operating-system files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Go build and test output
+app_go/.gocache/
+*.test
+coverage.out
+SmartClassDownloaderGo.exe
+
+# Python generated files
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local Python environments
+.venv/
+venv/
+env/
+ENV/
+plugins_env/
+
+# Application runtime data
+config/
+logs/
+runtime/
+SmartclassDownload/
+cache/
+
+# Downloaded plugin models and temporary tasks
+plugins/whisper/large-v3/
+plugins/whisper/server_temp/
+plugins/whisper/tasks/
+plugins/funasr/paraformer-zh/
+plugins/funasr/fsmn-vad/
+plugins/funasr/ct-punc/
+plugins/funasr/server_temp/
+plugins/funasr/tasks/
+plugins/slides_extractor/server_temp/
+plugins/slides_extractor/tasks/
+
+# Managed binaries: retain only the FunASR Python 3.13 compatibility wheel
+bin/*
+!bin/editdistance-0.8.1-cp313-cp313-win_amd64.whl
+
+# Temporary and packaging output
+*.tmp
+*.temp
+*.log
+build/
+dist/
+dist_nuitka/
+_internal/
+
