@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "whisper",
+      "folder": "whisper",
+      "entry": "main.py",
+      "venv": "whisper_env",
+      "default_port": 8000,
+      "health_path": "/status",
+      "capabilities": ["transcribe", "model_download"],
+      "requires": ["python", "vc_redist", "ffmpeg", "torch"],
+      "requirements": ["fastapi==0.128.0", "uvicorn==0.40.0", "python-multipart==0.0.22", "faster-whisper==1.2.1", "numpy==2.4.1"],
+      "managed_paths": ["large-v3", "server_temp", "tasks"]
+    },
+    {
+      "id": "funasr",
+      "folder": "funasr",
+      "entry": "main.py",
+      "venv": "funasr_env",
+      "default_port": 8001,
+      "health_path": "/status",
+      "capabilities": ["transcribe", "model_download"],
+      "requires": ["python", "vc_redist", "ffmpeg", "torch"],
+      "requirements": ["fastapi==0.128.0", "uvicorn==0.40.0", "python-multipart", "funasr==1.3.1", "modelscope==1.34.0"],
+      "managed_paths": ["paraformer-zh", "fsmn-vad", "ct-punc", "server_temp", "tasks"]
+    },
+    {
+      "id": "slides_extractor",
+      "folder": "slides_extractor",
+      "entry": "main.py",
+      "venv": "slides_env",
+      "default_port": 8002,
+      "health_path": "/docs",
+      "capabilities": ["slides"],
+      "requires": ["python", "vc_redist"],
+      "requirements": ["fastapi==0.128.0", "uvicorn==0.40.0", "pydantic==2.12.5", "opencv-python-headless==4.13.0.90", "numpy==2.4.1", "Pillow==12.1.0", "reportlab==4.4.9", "scikit-image==0.26.0"],
+      "managed_paths": ["__pycache__"]
+    }
+  ]
+}
