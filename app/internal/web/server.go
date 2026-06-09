@@ -191,6 +191,7 @@ func (server *Server) batchDownload(w http.ResponseWriter, request *http.Request
 		return
 	}
 	videoIDs := request.MultipartForm.Value["video_ids"]
+	videoTitles := request.MultipartForm.Value["video_titles"]
 	fileTypes := request.MultipartForm.Value["file_types"]
 	if len(videoIDs) == 0 {
 		ErrorJSON(w, http.StatusBadRequest, "未选择任何视频")
@@ -212,11 +213,6 @@ func (server *Server) batchDownload(w http.ResponseWriter, request *http.Request
 			}
 		}
 	}
-	client, err := server.sessions.ClientForOperation(request.Context())
-	if err != nil {
-		ErrorJSON(w, http.StatusUnauthorized, "登录已失效，请刷新页面")
-		return
-	}
 	dependencies := []string{}
 	if contains(fileTypes, "PPT") {
 		dependencies = append(dependencies, "slides_extractor")
@@ -224,27 +220,58 @@ func (server *Server) batchDownload(w http.ResponseWriter, request *http.Request
 	if len(transcribe) > 0 {
 		dependencies = append(dependencies, engine)
 	}
-	count := 0
-	for _, videoID := range videoIDs {
-		info, err := client.VideoInfo(request.Context(), videoID)
-		if err != nil {
+	url := settings.ASRServiceURL()
+	if engine == "funasr" {
+		url = strings.Replace(url, ":8000", ":8001", 1)
+	} else {
+		url = strings.Replace(url, ":8001", ":8000", 1)
+	}
+	added, skipped := addBatchCourseTasks(request.Context(), server.tasks.AddCourseTask, videoIDs, videoTitles, domain.CourseRequest{
+		TargetTypes: fileTypes, TranscribeTargets: transcribe, ASRServiceURL: url, PluginDependencies: dependencies,
+	})
+	if added == 0 {
+		ErrorJSON(w, http.StatusBadRequest, "未能添加任何任务")
+		return
+	}
+	message := fmt.Sprintf("已添加 %d 个任务", added)
+	if skipped > 0 {
+		message += fmt.Sprintf("，跳过 %d 个", skipped)
+	}
+	JSON(w, http.StatusOK, map[string]any{"status": "success", "msg": message, "added": added, "skipped": skipped})
+}
+
+func addBatchCourseTasks(
+	ctx context.Context,
+	add func(context.Context, domain.CourseRequest) (string, error),
+	videoIDs, videoTitles []string,
+	base domain.CourseRequest,
+) (added, skipped int) {
+	for index, value := range videoIDs {
+		videoID := strings.TrimSpace(value)
+		if videoID == "" {
+			skipped++
 			continue
 		}
-		url := settings.ASRServiceURL()
-		if engine == "funasr" {
-			url = strings.Replace(url, ":8000", ":8001", 1)
-		} else {
-			url = strings.Replace(url, ":8001", ":8000", 1)
+		item := base
+		item.VideoID = videoID
+		item.Title = batchCourseTitle(videoID, videoTitles, index)
+		if _, err := add(ctx, item); err != nil {
+			logger.Warnf("queue course task video_id=%s: %v", videoID, err)
+			skipped++
+			continue
 		}
-		_, err = server.tasks.AddCourseTask(request.Context(), domain.CourseRequest{
-			VideoID: videoID, Title: info.Title, TargetTypes: fileTypes, TranscribeTargets: transcribe,
-			ASRServiceURL: url, PluginDependencies: dependencies,
-		})
-		if err == nil {
-			count++
+		added++
+	}
+	return added, skipped
+}
+
+func batchCourseTitle(videoID string, titles []string, index int) string {
+	if index < len(titles) {
+		if title := strings.TrimSpace(titles[index]); title != "" {
+			return title
 		}
 	}
-	JSON(w, http.StatusOK, map[string]any{"status": "success", "msg": fmt.Sprintf("已添加 %d 个任务", count)})
+	return "视频任务 " + videoID
 }
 
 func (server *Server) tasksStatus(w http.ResponseWriter, _ *http.Request) {

@@ -85,6 +85,7 @@ type recordingSlots struct {
 	inSlot *bool
 }
 
+func (slots recordingSlots) WithPrepareSlot(_ context.Context, fn func() error) error  { return fn() }
 func (slots recordingSlots) WithDownloadSlot(_ context.Context, fn func() error) error { return fn() }
 func (slots recordingSlots) WithASRSlot(_ context.Context, fn func() error) error      { return fn() }
 func (slots recordingSlots) WithSlidesSlot(_ context.Context, fn func() error) error {

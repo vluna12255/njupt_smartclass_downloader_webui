@@ -2,7 +2,7 @@
     {{if .Videos}}
         {{range .Videos}}
 <div class="video-card bg-white rounded-lg shadow-md cursor-pointer relative overflow-hidden transition-all duration-200 hover:shadow-xl hover:-translate-y-1 group" onclick="toggleSelection(this)">
-    <input type="checkbox" name="video_ids" value="{{.ID}}" class="hidden">
+    <input type="checkbox" name="video_ids" value="{{.ID}}" data-video-title="{{.Title}}" class="hidden">
     <div class="check-icon hidden absolute top-2 right-2 bg-blue-500 text-white rounded-full p-1 shadow-lg z-10">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path></svg>
     </div>

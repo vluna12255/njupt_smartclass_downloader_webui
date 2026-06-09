@@ -31,7 +31,6 @@ ENV/
 plugins_env/
 
 # Application runtime data
-config/
 logs/
 runtime/
 SmartclassDownload/

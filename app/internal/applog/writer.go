@@ -65,19 +65,48 @@ func (writer *rotatingFileWriter) rotate() error {
 		return err
 	}
 	writer.file = nil
-	if writer.backups > 0 {
-		for index := writer.backups - 1; index >= 1; index-- {
-			if err := replaceFile(backupPath(writer.path, index), backupPath(writer.path, index+1)); err != nil {
-				return err
-			}
-		}
-		if err := replaceFile(writer.path, backupPath(writer.path, 1)); err != nil {
-			return err
-		}
-	} else if err := os.Remove(writer.path); err != nil && !os.IsNotExist(err) {
+	if err := rotateExistingFile(writer.path, writer.backups); err != nil {
 		return err
 	}
 	return writer.open()
+}
+
+func RotateIfNeeded(path string, maxBytes int64, backups int) error {
+	if maxBytes < 0 {
+		return fmt.Errorf("log max bytes must not be negative")
+	}
+	if backups < 0 {
+		return fmt.Errorf("log backup count must not be negative")
+	}
+	if maxBytes == 0 {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Size() < maxBytes {
+		return nil
+	}
+	return rotateExistingFile(path, backups)
+}
+
+func rotateExistingFile(path string, backups int) error {
+	if backups > 0 {
+		for index := backups - 1; index >= 1; index-- {
+			if err := replaceFile(backupPath(path, index), backupPath(path, index+1)); err != nil {
+				return err
+			}
+		}
+		return replaceFile(path, backupPath(path, 1))
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func (writer *rotatingFileWriter) open() error {

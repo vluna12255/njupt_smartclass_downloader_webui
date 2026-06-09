@@ -12,8 +12,8 @@ import (
 
 const (
 	defaultFileName = "smartclass_go.log"
-	defaultMaxBytes = 10 * 1024 * 1024
-	defaultBackups  = 5
+	DefaultMaxBytes = 10 * 1024 * 1024
+	DefaultBackups  = 5
 )
 
 type Level int
@@ -84,10 +84,10 @@ func New(config Config) (*Manager, error) {
 		return nil, fmt.Errorf("log filename must not contain a directory: %s", config.FileName)
 	}
 	if config.MaxBytes == 0 {
-		config.MaxBytes = defaultMaxBytes
+		config.MaxBytes = DefaultMaxBytes
 	}
 	if config.Backups == 0 {
-		config.Backups = defaultBackups
+		config.Backups = DefaultBackups
 	}
 	if config.Now == nil {
 		config.Now = time.Now

@@ -30,3 +30,16 @@ func TestNextAvailableID(t *testing.T) {
 		t.Fatalf("NextAvailableID() = %s", got)
 	}
 }
+
+func TestTaskTitleCanBeUpdated(t *testing.T) {
+	store := NewStore()
+	_ = store.Create(domain.NewTask("video", "temporary title", domain.TaskKindCourse))
+
+	got, err := store.Update("video", domain.TaskUpdate{Title: domain.String("resolved title")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "resolved title" {
+		t.Fatalf("title = %q, want resolved title", got.Title)
+	}
+}

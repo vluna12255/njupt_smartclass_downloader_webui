@@ -18,42 +18,12 @@ type Service struct {
 }
 
 type Summary struct {
-	LogsRemoved      int
 	TemporaryRemoved int
-	LogsError        error
 	TemporaryError   error
 }
 
 func NewService(layout platform.Layout, provider interface{ Current() config.Settings }) *Service {
 	return &Service{layout: layout, config: provider}
-}
-
-func (service *Service) CleanLogs() (int, error) {
-	return CleanLogs(service.layout.LogsDir)
-}
-
-func CleanLogs(root string) (int, error) {
-	entries, err := os.ReadDir(root)
-	if os.IsNotExist(err) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	count := 0
-	var removeErrors []error
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		path := filepath.Join(root, entry.Name())
-		if err := os.Remove(path); err != nil {
-			removeErrors = append(removeErrors, fmt.Errorf("remove %s: %w", entry.Name(), err))
-			continue
-		}
-		count++
-	}
-	return count, errors.Join(removeErrors...)
 }
 
 func (service *Service) CleanTemporaryDownloads() (int, error) {

@@ -7,6 +7,7 @@ import (
 )
 
 type Scheduler struct {
+	prepareSlots  chan struct{}
 	downloadSlots chan struct{}
 	slidesSlots   chan struct{}
 	asrSlots      chan struct{}
@@ -14,10 +15,15 @@ type Scheduler struct {
 
 func NewScheduler(settings config.Settings) *Scheduler {
 	return &Scheduler{
+		prepareSlots:  make(chan struct{}, settings.MaxDownloadConcurrent),
 		downloadSlots: make(chan struct{}, settings.MaxDownloadConcurrent),
 		slidesSlots:   make(chan struct{}, 1),
 		asrSlots:      make(chan struct{}, 1),
 	}
+}
+
+func (scheduler *Scheduler) WithPrepareSlot(ctx context.Context, fn func() error) error {
+	return withSlot(ctx, scheduler.prepareSlots, fn)
 }
 
 func (scheduler *Scheduler) WithDownloadSlot(ctx context.Context, fn func() error) error {

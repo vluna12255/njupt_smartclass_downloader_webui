@@ -40,6 +40,7 @@ type Task struct {
 }
 
 type TaskUpdate struct {
+	Title          *string
 	Status         *TaskStatus
 	Progress       *float64
 	TotalSize      *int64
@@ -81,6 +82,9 @@ func NewTask(id, title string, kind TaskKind) Task {
 }
 
 func (task *Task) Apply(update TaskUpdate) {
+	if update.Title != nil {
+		task.Title = *update.Title
+	}
 	if update.Status != nil {
 		task.Status = *update.Status
 	}

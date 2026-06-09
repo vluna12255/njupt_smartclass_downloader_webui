@@ -15,6 +15,7 @@ import (
 )
 
 type SlotProvider interface {
+	WithPrepareSlot(context.Context, func() error) error
 	WithDownloadSlot(context.Context, func() error) error
 	WithSlidesSlot(context.Context, func() error) error
 	WithASRSlot(context.Context, func() error) error
@@ -35,43 +36,60 @@ func NewDownloadStep(sessions *smartclass.SessionManager, service *aria2.Downloa
 
 func (step *DownloadStep) Run(ctx context.Context, request domain.CourseRequest, report func(domain.TaskUpdate)) (*Context, error) {
 	settings := step.config.Current()
-	client, err := step.sessions.Client(ctx)
-	if err != nil {
-		return nil, err
-	}
-	httpClient, err := step.sessions.HTTPClient(ctx)
-	if err != nil {
-		return nil, err
-	}
-	report(domain.TaskUpdate{Message: domain.String("正在解析课程信息..."), Progress: domain.Float(0)})
-	info, err := step.loadVideoInfo(ctx, client, request.VideoID, settings)
-	if err != nil {
-		return nil, err
-	}
-	baseDir, err := createBaseDir(info, settings.DownloadDir)
-	if err != nil {
-		return nil, err
-	}
-	report(domain.TaskUpdate{Message: domain.String("正在获取视频索引...")})
-	artifacts, err := step.resolver.Resolve(ctx, httpClient, info.Segments, baseDir, time.Duration(settings.NetworkTimeoutSeconds)*time.Second)
+	var workflowContext *Context
+	report(domain.TaskUpdate{
+		Status: status(domain.TaskWaiting), CurrentAction: domain.String("解析课程"),
+		Message: domain.String("等待课程解析队列..."), Progress: domain.Float(0),
+	})
+	err := step.slots.WithPrepareSlot(ctx, func() error {
+		report(domain.TaskUpdate{
+			Status: status(domain.TaskRunning), CurrentAction: domain.String("解析课程"),
+			Message: domain.String("正在解析课程信息..."),
+		})
+		client, err := step.sessions.Client(ctx)
+		if err != nil {
+			return err
+		}
+		httpClient, err := step.sessions.HTTPClient(ctx)
+		if err != nil {
+			return err
+		}
+		info, err := step.loadVideoInfo(ctx, client, request.VideoID, settings)
+		if err != nil {
+			return err
+		}
+		if title := strings.TrimSpace(info.Title); title != "" {
+			report(domain.TaskUpdate{Title: domain.String(title)})
+		}
+		baseDir, err := createBaseDir(info, settings.DownloadDir)
+		if err != nil {
+			return err
+		}
+		report(domain.TaskUpdate{CurrentAction: domain.String("解析索引"), Message: domain.String("正在获取视频索引...")})
+		artifacts, err := step.resolver.Resolve(ctx, httpClient, info.Segments, baseDir, time.Duration(settings.NetworkTimeoutSeconds)*time.Second)
+		if err != nil {
+			return err
+		}
+		workflowContext = &Context{
+			TaskID: request.TaskID, BaseDir: baseDir, Settings: settings, HTTPClient: httpClient,
+			Video: info, NeedPPT: contains(request.TargetTypes, "PPT"), ASRServiceURL: request.ASRServiceURL,
+			TranscribeTargets: request.TranscribeTargets, Artifacts: artifacts,
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
 	downloadTracks := without(request.TargetTypes, "PPT")
-	needPPT := contains(request.TargetTypes, "PPT")
-	if needPPT && !contains(downloadTracks, "VGA") {
+	if workflowContext.NeedPPT && !contains(downloadTracks, "VGA") {
 		downloadTracks = append(downloadTracks, "VGA")
 	}
 	for _, track := range request.TranscribeTargets {
-		if len(artifacts[track]) > 0 && !contains(downloadTracks, track) {
+		if len(workflowContext.Artifacts[track]) > 0 && !contains(downloadTracks, track) {
 			downloadTracks = append(downloadTracks, track)
 		}
 	}
-	workflowContext := &Context{
-		TaskID: request.TaskID, BaseDir: baseDir, Settings: settings, HTTPClient: httpClient,
-		Video: info, NeedPPT: needPPT, DownloadTracks: downloadTracks, ASRServiceURL: request.ASRServiceURL,
-		TranscribeTargets: request.TranscribeTargets, Artifacts: artifacts,
-	}
+	workflowContext.DownloadTracks = downloadTracks
 	if err := step.downloadArtifacts(ctx, workflowContext, report); err != nil {
 		return nil, err
 	}

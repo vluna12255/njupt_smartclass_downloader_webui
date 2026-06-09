@@ -51,6 +51,7 @@ func (manager *Manager) AddCourseTask(ctx context.Context, request domain.Course
 	if err := manager.store.Create(item); err != nil {
 		return "", err
 	}
+	manager.publish(item)
 	child, cancel := context.WithCancel(manager.root)
 	manager.cancellations.Register(id, cancel)
 	logger.Infof("queued course task id=%s title=%s", id, request.Title)

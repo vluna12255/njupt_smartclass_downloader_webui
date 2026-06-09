@@ -4,38 +4,51 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"smartclassdownloader/internal/config"
+	"smartclassdownloader/internal/platform"
 )
 
-func TestCleanLogsRemovesEveryTopLevelFile(t *testing.T) {
-	root := t.TempDir()
-	nested := filepath.Join(root, "nested")
-	if err := os.Mkdir(nested, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range []string{
-		filepath.Join(root, "server.log"),
-		filepath.Join(root, "smartclass_go.log.1"),
-		filepath.Join(root, "notes.txt"),
-		filepath.Join(nested, "keep.log"),
-	} {
-		if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
+type staticSettings struct {
+	settings config.Settings
+}
 
-	count, err := CleanLogs(root)
+func (provider staticSettings) Current() config.Settings {
+	return provider.settings
+}
+
+func TestStartupCleanupRemovesTemporaryDownloadsWithoutTouchingLogs(t *testing.T) {
+	root := t.TempDir()
+	layout, err := platform.ResolveLayout(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count != 3 {
-		t.Fatalf("CleanLogs() count = %d, want 3", count)
+	if err := layout.EnsureMutableDirs(); err != nil {
+		t.Fatal(err)
 	}
-	for _, name := range []string{"server.log", "smartclass_go.log.1", "notes.txt"} {
-		if _, err := os.Stat(filepath.Join(root, name)); !os.IsNotExist(err) {
-			t.Fatalf("%s still exists: %v", name, err)
+	temporary := filepath.Join(layout.DownloadsDir, "video.tmp")
+	download := filepath.Join(layout.DownloadsDir, "video.mp4")
+	logPath := filepath.Join(layout.LogsDir, "smartclass_go.log")
+	for _, path := range []string{temporary, download, logPath} {
+		if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(nested, "keep.log")); err != nil {
-		t.Fatalf("nested log should remain: %v", err)
+	service := NewService(layout, staticSettings{settings: config.Settings{DownloadDir: layout.DownloadsDir}})
+
+	removed, err := service.CleanTemporaryDownloads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	if _, err := os.Stat(temporary); !os.IsNotExist(err) {
+		t.Fatalf("temporary download still exists: %v", err)
+	}
+	for _, path := range []string{download, logPath} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("retained file missing: %s: %v", path, err)
+		}
 	}
 }

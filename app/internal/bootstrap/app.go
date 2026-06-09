@@ -57,7 +57,6 @@ func NewApplication(ctx context.Context, options Options) (_ *Application, err e
 	if err := layout.EnsureMutableDirs(); err != nil {
 		return nil, err
 	}
-	logsRemoved, logsErr := cleanup.CleanLogs(layout.LogsDir)
 	logs, err := applog.Configure(applog.Config{Dir: layout.LogsDir, Level: options.LogLevel})
 	if err != nil {
 		return nil, fmt.Errorf("configure logging: %w", err)
@@ -112,7 +111,7 @@ func NewApplication(ctx context.Context, options Options) (_ *Application, err e
 		Layout: layout, Config: settings, Sessions: sessions, Tasks: tasks, Plugins: plugins,
 		Downloads: downloads, Workflows: pipeline, Web: webServer, Cleanup: cleanup.NewService(layout, settings),
 		aria2: ariaProcess, browser: platform.NewBrowser(), logs: logs, options: options,
-		cleanup: cleanup.Summary{LogsRemoved: logsRemoved, LogsError: logsErr},
+		cleanup: cleanup.Summary{},
 	}
 	succeeded = true
 	return application, nil
@@ -134,10 +133,7 @@ func (application *Application) Start(ctx context.Context) error {
 	}
 	summary := application.cleanup
 	summary.TemporaryRemoved, summary.TemporaryError = application.Cleanup.CleanTemporaryDownloads()
-	logger.Infof("startup cleanup: %d logs, %d temporary files", summary.LogsRemoved, summary.TemporaryRemoved)
-	if summary.LogsError != nil {
-		logger.Warnf("clean old logs: %v", summary.LogsError)
-	}
+	logger.Infof("startup cleanup: %d temporary files; logs retained with size-based rotation", summary.TemporaryRemoved)
 	if summary.TemporaryError != nil {
 		logger.Warnf("clean temporary files: %v", summary.TemporaryError)
 	}

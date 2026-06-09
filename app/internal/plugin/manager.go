@@ -188,7 +188,11 @@ func (manager *Manager) start(ctx context.Context, id string, definition Definit
 		extra["PLUGIN_STATUS_FILE"] = manager.layout.PluginStatusFile(id)
 		manager.statuses.Update(id, RuntimeStatus{Phase: "initializing", Message: "正在启动插件进程并检查模型文件..."})
 	}
-	logFile, err := os.OpenFile(filepath.Join(manager.layout.LogsDir, id+"_run.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	logPath := filepath.Join(manager.layout.LogsDir, id+"_run.log")
+	if err := applog.RotateIfNeeded(logPath, applog.DefaultMaxBytes, applog.DefaultBackups); err != nil {
+		return fmt.Errorf("rotate plugin log: %w", err)
+	}
+	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
 	}
@@ -205,7 +209,7 @@ func (manager *Manager) start(ctx context.Context, id string, definition Definit
 	manager.mu.Lock()
 	manager.processes[id] = runningPlugin{process: process, port: port}
 	manager.mu.Unlock()
-	logger.Infof("started plugin id=%s port=%d log=%s", id, port, filepath.Join(manager.layout.LogsDir, id+"_run.log"))
+	logger.Infof("started plugin id=%s port=%d log=%s", id, port, logPath)
 	if manager.startupTask == nil {
 		return nil
 	}

@@ -52,6 +52,17 @@ window.currentConfig = {};
             if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
         }
 
+        async function refreshTasksFromServer() {
+            try {
+                const response = await fetch('/api/tasks');
+                const tasks = await response.json();
+                tasks.forEach(t => { taskStore[t.id] = t; });
+                renderTaskList();
+            } catch (e) {
+                console.error('任务列表刷新失败:', e);
+            }
+        }
+
         // ── WebSocket 消息分发 ──
         function handleWebSocketMessage(msg) {
             if (msg.type === 'task_list') {
@@ -507,6 +518,10 @@ window.currentConfig = {};
         async function confirmDownload() {
             const form = document.getElementById('video-form');
             const formData = new FormData(form);
+
+            document.querySelectorAll('input[name="video_ids"]:checked').forEach(input => {
+                formData.append('video_titles', input.dataset.videoTitle || input.value);
+            });
             
             document.querySelectorAll('#download-modal input[name="file_types"]:checked').forEach(cb => formData.append('file_types', cb.value));
             
@@ -527,6 +542,7 @@ window.currentConfig = {};
                 if (result.status === 'success') {
                     document.querySelectorAll('.video-card.selected').forEach(el => { el.classList.remove('selected'); el.querySelector('input').checked = false; });
                     updateDownloadBtn();
+                    await refreshTasksFromServer();
                     switchTab('tasks');
                 } else {
                     showToast('错误: ' + (result.msg || '未知错误'));
