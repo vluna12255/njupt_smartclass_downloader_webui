@@ -11,8 +11,9 @@ desktop.ini
 # Go build and test output
 app_go/.gocache/
 *.test
+*_test.go
 coverage.out
-SmartClassDownloaderGo.exe
+SmartClassDownloader.exe
 
 # Python generated files
 **/__pycache__/
