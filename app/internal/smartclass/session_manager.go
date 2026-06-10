@@ -13,19 +13,31 @@ import (
 )
 
 type SessionManager struct {
-	mu         sync.RWMutex
-	config     *config.Service
-	httpClient *http.Client
-	client     *Client
+	mu               sync.RWMutex
+	loginMu          sync.Mutex
+	config           *config.Service
+	newSessionClient func(time.Duration) (*http.Client, error)
+	httpClient       *http.Client
+	client           *Client
 }
 
 func NewSessionManager(service *config.Service) *SessionManager {
-	return &SessionManager{config: service}
+	return &SessionManager{config: service, newSessionClient: NewSessionHTTPClient}
 }
 
 func (manager *SessionManager) Login(ctx context.Context, username, password string) error {
+	manager.loginMu.Lock()
+	defer manager.loginMu.Unlock()
+	return manager.loginLocked(ctx, username, password)
+}
+
+func (manager *SessionManager) loginLocked(ctx context.Context, username, password string) error {
 	timeout := time.Duration(manager.config.Current().NetworkTimeoutSeconds) * time.Second
-	httpClient, err := NewSessionHTTPClient(timeout)
+	factory := manager.newSessionClient
+	if factory == nil {
+		factory = NewSessionHTTPClient
+	}
+	httpClient, err := factory(timeout)
 	if err != nil {
 		return err
 	}
@@ -53,6 +65,12 @@ func (manager *SessionManager) Login(ctx context.Context, username, password str
 }
 
 func (manager *SessionManager) AutoLogin(ctx context.Context) error {
+	manager.loginMu.Lock()
+	defer manager.loginMu.Unlock()
+	return manager.autoLoginLocked(ctx)
+}
+
+func (manager *SessionManager) autoLoginLocked(ctx context.Context) error {
 	username, password, ok, err := manager.config.Credentials(ctx)
 	if err != nil {
 		return err
@@ -60,59 +78,63 @@ func (manager *SessionManager) AutoLogin(ctx context.Context) error {
 	if !ok {
 		return fmt.Errorf("无保存的凭证")
 	}
-	return manager.Login(ctx, username, password)
+	return manager.loginLocked(ctx, username, password)
 }
 
 func (manager *SessionManager) Client(ctx context.Context) (*Client, error) {
-	manager.mu.RLock()
-	client := manager.client
-	manager.mu.RUnlock()
-	if client != nil && manager.IsValid(ctx) {
+	client, httpClient := manager.currentPair()
+	if client != nil && manager.isValid(ctx, httpClient) {
 		return client, nil
 	}
-	if manager.config.Current().AutoLogin {
-		if err := manager.AutoLogin(ctx); err == nil {
-			manager.mu.RLock()
-			defer manager.mu.RUnlock()
-			return manager.client, nil
-		}
+	if !manager.config.Current().AutoLogin {
+		return nil, fmt.Errorf("登录已失效")
+	}
+
+	manager.loginMu.Lock()
+	defer manager.loginMu.Unlock()
+
+	client, httpClient = manager.currentPair()
+	if client != nil && manager.isValid(ctx, httpClient) {
+		return client, nil
+	}
+	if err := manager.autoLoginLocked(ctx); err == nil {
+		client, _ = manager.currentPair()
+		return client, nil
 	}
 	return nil, fmt.Errorf("登录已失效")
 }
 
-// ClientForOperation returns the active client without an extra network probe.
-// The operation itself will surface an expired session while avoiding a slow
-// round trip before every search or download request.
+// ClientForOperation validates the active session before a SmartClass operation.
 func (manager *SessionManager) ClientForOperation(ctx context.Context) (*Client, error) {
-	manager.mu.RLock()
-	client := manager.client
-	manager.mu.RUnlock()
-	if client != nil {
-		return client, nil
-	}
-	if manager.config.Current().AutoLogin {
-		if err := manager.AutoLogin(ctx); err == nil {
-			manager.mu.RLock()
-			defer manager.mu.RUnlock()
-			return manager.client, nil
-		}
-	}
-	return nil, fmt.Errorf("登录已失效")
+	return manager.Client(ctx)
 }
 
 func (manager *SessionManager) HTTPClient(ctx context.Context) (*http.Client, error) {
-	if _, err := manager.Client(ctx); err != nil {
+	_, httpClient, err := manager.ClientPair(ctx)
+	if err != nil {
 		return nil, err
+	}
+	return httpClient, nil
+}
+
+func (manager *SessionManager) ClientPair(ctx context.Context) (*Client, *http.Client, error) {
+	if _, err := manager.Client(ctx); err != nil {
+		return nil, nil, err
 	}
 	manager.mu.RLock()
 	defer manager.mu.RUnlock()
-	return manager.httpClient, nil
+	if manager.client == nil || manager.httpClient == nil {
+		return nil, nil, fmt.Errorf("登录已失效")
+	}
+	return manager.client, manager.httpClient, nil
 }
 
 func (manager *SessionManager) IsValid(ctx context.Context) bool {
-	manager.mu.RLock()
-	current := manager.httpClient
-	manager.mu.RUnlock()
+	_, current := manager.currentPair()
+	return manager.isValid(ctx, current)
+}
+
+func (manager *SessionManager) isValid(ctx context.Context, current *http.Client) bool {
 	if current == nil {
 		return false
 	}
@@ -133,6 +155,12 @@ func (manager *SessionManager) Clear() {
 	manager.client = nil
 	manager.httpClient = nil
 	manager.mu.Unlock()
+}
+
+func (manager *SessionManager) currentPair() (*Client, *http.Client) {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	return manager.client, manager.httpClient
 }
 
 func HeadersAndCookies(client *http.Client, target string) []string {

@@ -46,11 +46,7 @@ func (step *DownloadStep) Run(ctx context.Context, request domain.CourseRequest,
 			Status: status(domain.TaskRunning), CurrentAction: domain.String("解析课程"),
 			Message: domain.String("正在解析课程信息..."),
 		})
-		client, err := step.sessions.Client(ctx)
-		if err != nil {
-			return err
-		}
-		httpClient, err := step.sessions.HTTPClient(ctx)
+		client, httpClient, err := step.sessions.ClientPair(ctx)
 		if err != nil {
 			return err
 		}
