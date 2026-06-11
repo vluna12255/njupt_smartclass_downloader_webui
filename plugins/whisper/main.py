@@ -31,6 +31,7 @@ if PLUGINS_DIR not in sys.path:
 from common.async_task_manager import get_task_manager, TaskStatus
 from common.aria2_model_downloader import (
     Aria2ModelDownloader,
+    check_model_source_connectivity,
     create_download_progress_callback,
     huggingface_model_files,
 )
@@ -97,27 +98,24 @@ def load_model_logic():
     global_status.update(phase="checking", message="正在检查 Whisper 模型文件...", progress=5, total_size=0, downloaded_size=0, speed=0)
     _report_to_main("checking", "正在检查 Whisper 模型文件...", progress=5, total_size=0, downloaded_size=0, speed=0)
 
-    # 检测模型文件完整性，不完整则清理后重新下载
-    if os.path.exists(MODEL_DIR_PATH) and not _validate_model_files(MODEL_DIR_PATH):
-        print(f"--- 检测到模型文件不完整（model.bin 缺失或过小），正在清理残留目录以重新下载 ---")
-        global_status.update(phase="downloading", message="模型文件不完整，正在重新下载...", progress=1)
-        _report_to_main("downloading", "模型文件不完整，正在重新下载...", progress=1)
-        try:
-            import shutil as _shutil
-            _shutil.rmtree(MODEL_DIR_PATH)
-            print(f"--- 已清理目录: {MODEL_DIR_PATH} ---")
-        except Exception as clean_err:
-            print(f"--- 清理目录失败: {clean_err}，将尝试继续下载 ---")
-
     if _validate_model_files(MODEL_DIR_PATH):
         actual_model_path = MODEL_DIR_PATH
         global_status.update(phase="checking", message="Whisper 模型文件检查完成", progress=80, total_size=0, downloaded_size=0, speed=0)
         _report_to_main("checking", "Whisper 模型文件检查完成", progress=80, total_size=0, downloaded_size=0, speed=0)
     else:
         # ── 阶段1：下载模型 ──
-        global_status.update(phase="downloading", message=f"正在下载模型 {MODEL_SIZE}...", progress=5, total_size=0, downloaded_size=0, speed=0)
-        _report_to_main("downloading", f"正在下载模型 {MODEL_SIZE}...", progress=5, total_size=0, downloaded_size=0, speed=0)
+        global_status.update(phase="checking", message="正在检测 Hugging Face 网络连通性...", progress=5, total_size=0, downloaded_size=0, speed=0)
+        _report_to_main("checking", "正在检测 Hugging Face 网络连通性...", progress=5, total_size=0, downloaded_size=0, speed=0)
         try:
+            check_model_source_connectivity(
+                "Hugging Face",
+                f"https://huggingface.co/api/models/{REMOTE_MODEL_ID}",
+                network_mode="system_proxy",
+            )
+            if os.path.exists(MODEL_DIR_PATH):
+                shutil.rmtree(MODEL_DIR_PATH)
+            global_status.update(phase="downloading", message=f"正在通过系统代理下载模型 {MODEL_SIZE}...", progress=5, total_size=0, downloaded_size=0, speed=0)
+            _report_to_main("downloading", f"正在通过系统代理下载模型 {MODEL_SIZE}...", progress=5, total_size=0, downloaded_size=0, speed=0)
             actual_model_path = Aria2ModelDownloader().download_snapshot(
                 huggingface_model_files(REMOTE_MODEL_ID),
                 MODEL_DIR_PATH,

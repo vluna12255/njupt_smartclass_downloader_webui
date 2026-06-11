@@ -64,17 +64,23 @@ class PluginServiceStatus:
 
 
 def create_startup_reporter(main_server_url: str, plugin_name: str):
+    session = None
+
     def report(phase: str, message: str, progress: float = -1, success: bool = True, **details):
+        nonlocal session
         if not main_server_url:
             return
         try:
             import requests
 
+            if session is None:
+                session = requests.Session()
+                session.trust_env = False
             payload = {"phase": phase, "message": message, "success": success}
             if progress >= 0:
                 payload["progress"] = progress
             payload.update(details)
-            requests.post(
+            session.post(
                 f"{main_server_url.rstrip('/')}/api/plugins/{plugin_name}/startup_report",
                 json=payload,
                 timeout=5,

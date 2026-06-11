@@ -57,9 +57,10 @@ func (manager *ProcessManager) EnsureRunning(ctx context.Context) (*RPCClient, e
 		"--rpc-secret=" + secret, "--rpc-allow-origin-all=false", "--file-allocation=none",
 		fmt.Sprintf("--stop-with-process=%d", os.Getpid()),
 		"--auto-file-renaming=false", "--allow-overwrite=true", "--summary-interval=0", "--console-log-level=warn",
+		"--all-proxy=", "--http-proxy=", "--https-proxy=", "--ftp-proxy=",
 	}
 	process, err := platform.StartManagedProcess(context.Background(), platform.CommandSpec{
-		Path: binary, Args: args, Env: platform.BaseEnvironment(nil),
+		Path: binary, Args: args, Env: platform.DirectEnvironment(nil),
 		Stdout: io.Discard, Stderr: io.Discard, Hidden: true,
 	})
 	if err != nil {
@@ -96,7 +97,12 @@ func (manager *ProcessManager) Environment(ctx context.Context) (map[string]stri
 	}
 	return map[string]string{
 		"ARIA2_RPC_URL": client.URL, "ARIA2_RPC_SECRET": client.Secret, "ARIA2C_PATH": binary,
+		"MODEL_NETWORK_MODE": "direct",
 	}, nil
+}
+
+func (manager *ProcessManager) Binary(ctx context.Context) (string, error) {
+	return manager.binary.Ensure(ctx)
 }
 
 func (manager *ProcessManager) Stop(ctx context.Context) error {

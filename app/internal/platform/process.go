@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
@@ -118,7 +119,35 @@ func (p *managedProcess) Stop(ctx context.Context) error {
 }
 
 func BaseEnvironment(extra map[string]string) []string {
-	env := os.Environ()
+	return buildEnvironment(extra, nil)
+}
+
+func DirectEnvironment(extra map[string]string) []string {
+	blocked := map[string]bool{
+		"HTTP_PROXY": true, "HTTPS_PROXY": true, "ALL_PROXY": true,
+		"FTP_PROXY": true, "NO_PROXY": true,
+	}
+	direct := make(map[string]string, len(extra)+1)
+	for key, value := range extra {
+		direct[key] = value
+	}
+	direct["NO_PROXY"] = "*"
+	return buildEnvironment(direct, blocked)
+}
+
+func buildEnvironment(extra map[string]string, blocked map[string]bool) []string {
+	overrides := make(map[string]bool, len(extra))
+	for key := range extra {
+		overrides[strings.ToUpper(key)] = true
+	}
+	env := make([]string, 0, len(os.Environ())+len(extra)+1)
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		upper := strings.ToUpper(key)
+		if !blocked[upper] && !overrides[upper] {
+			env = append(env, entry)
+		}
+	}
 	for key, value := range extra {
 		env = append(env, key+"="+value)
 	}

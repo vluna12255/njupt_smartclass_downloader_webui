@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import atexit
 from dataclasses import dataclass
@@ -20,6 +21,76 @@ from typing import Callable, Iterable, Optional
 
 class Aria2ModelDownloadError(RuntimeError):
     """Raised when a plugin model file cannot be downloaded."""
+
+
+def system_proxy_url() -> str:
+    proxies = urllib.request.getproxies()
+    if not any(proxies.get(key) for key in ("https", "http", "all")):
+        registry_reader = getattr(urllib.request, "getproxies_registry", None)
+        if registry_reader:
+            proxies = registry_reader()
+    proxy = proxies.get("https") or proxies.get("http") or proxies.get("all")
+    if not proxy:
+        raise Aria2ModelDownloadError(
+            "未检测到可用的 HTTP 系统代理，Whisper 模型下载需要启用系统代理"
+        )
+    if "://" not in proxy:
+        proxy = f"http://{proxy}"
+    if not proxy.lower().startswith(("http://", "https://")):
+        raise Aria2ModelDownloadError(
+            f"系统代理类型不受支持: {proxy}，请使用 HTTP 或 Mixed 代理端口"
+        )
+    return proxy
+
+
+def _direct_opener():
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def check_model_source_connectivity(
+    source_name: str,
+    url: str,
+    network_mode: Optional[str] = None,
+    attempts: int = 3,
+    timeout: float = 8.0,
+) -> None:
+    mode = (network_mode or os.environ.get("MODEL_NETWORK_MODE", "direct")).strip().lower()
+    opener = _direct_opener() if mode != "system_proxy" else None
+    last_error = None
+    for attempt in range(max(1, attempts)):
+        try:
+            if mode == "system_proxy":
+                proxy = system_proxy_url()
+                import httpx
+
+                with httpx.Client(proxy=proxy, follow_redirects=True, timeout=timeout) as client:
+                    response = client.get(
+                        url,
+                        headers={"User-Agent": "SmartClassDownloader/1.0", "Range": "bytes=0-0"},
+                    )
+                    if response.status_code < 500:
+                        return
+                    last_error = RuntimeError(f"HTTP {response.status_code}")
+            else:
+                request = urllib.request.Request(
+                    url,
+                    headers={"User-Agent": "SmartClassDownloader/1.0", "Range": "bytes=0-0"},
+                    method="GET",
+                )
+                with opener.open(request, timeout=timeout) as response:
+                    if response.status < 500:
+                        return
+                    last_error = RuntimeError(f"HTTP {response.status}")
+        except urllib.error.HTTPError as exc:
+            if exc.code < 500:
+                return
+            last_error = exc
+        except Exception as exc:
+            last_error = exc
+        if attempt + 1 < attempts:
+            time.sleep(1)
+    hint = "请尝试更换网络或启用系统代理解决" if mode == "system_proxy" else "请尝试更换网络后重试"
+    raise Aria2ModelDownloadError(f"{source_name} 网络不可达，{hint}: {last_error}")
 
 
 @dataclass(frozen=True)
@@ -54,6 +125,7 @@ class Aria2RpcClient:
         self.timeout = timeout
         self._request_id = 0
         self._lock = threading.Lock()
+        self._opener = _direct_opener()
 
     @classmethod
     def from_environment(cls):
@@ -80,7 +152,7 @@ class Aria2RpcClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with self._opener.open(request, timeout=self.timeout) as response:
                 result = json.loads(response.read().decode("utf-8"))
         except Exception as exc:
             raise Aria2ModelDownloadError(f"aria2 RPC 请求失败: {exc}") from exc
@@ -120,6 +192,7 @@ class PluginAria2ProcessManager:
         self.process = None
         self.client = None
         self._lock = threading.Lock()
+        self.network_mode = os.environ.get("MODEL_NETWORK_MODE", "direct").strip().lower()
 
     def ensure_running(self) -> Aria2RpcClient:
         with self._lock:
@@ -145,12 +218,23 @@ class PluginAria2ProcessManager:
                 "--summary-interval=0",
                 "--console-log-level=warn",
             ]
+            if self.network_mode == "system_proxy":
+                proxy = system_proxy_url()
+                args.extend([
+                    f"--all-proxy={proxy}",
+                    f"--http-proxy={proxy}",
+                    f"--https-proxy={proxy}",
+                    "--no-proxy=127.0.0.1,localhost,::1",
+                ])
+            else:
+                args.extend(["--all-proxy=", "--http-proxy=", "--https-proxy=", "--ftp-proxy="])
             creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             self.process = self.popen(
                 args,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=self._process_environment(),
                 creationflags=creationflags,
             )
             self.client = self.client_factory(rpc_url, secret=secret)
@@ -205,6 +289,14 @@ class PluginAria2ProcessManager:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.bind(("127.0.0.1", 0))
             return sock.getsockname()[1]
+
+    def _process_environment(self) -> dict:
+        env = os.environ.copy()
+        for key in list(env):
+            if key.upper() in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY", "NO_PROXY"}:
+                del env[key]
+        env["NO_PROXY"] = "*" if self.network_mode == "direct" else "127.0.0.1,localhost,::1"
+        return env
 
 
 _plugin_aria2_process_manager = PluginAria2ProcessManager()
@@ -353,7 +445,11 @@ class Aria2ModelDownloader:
 
 
 def huggingface_model_files(repo_id: str, revision: str = "main") -> list[RemoteModelFile]:
-    from huggingface_hub import HfApi, hf_hub_url
+    import httpx
+    from huggingface_hub import HfApi, hf_hub_url, set_client_factory
+
+    proxy = system_proxy_url()
+    set_client_factory(lambda: httpx.Client(proxy=proxy, follow_redirects=True, timeout=None))
 
     info = HfApi().model_info(repo_id, revision=revision, files_metadata=True)
     files = []

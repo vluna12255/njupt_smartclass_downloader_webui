@@ -19,6 +19,7 @@ if PLUGINS_DIR not in sys.path:
 from common.async_task_manager import get_task_manager, TaskStatus
 from common.aria2_model_downloader import (
     Aria2ModelDownloader,
+    check_model_source_connectivity,
     create_download_progress_callback,
     modelscope_model_files,
 )
@@ -118,9 +119,16 @@ def check_and_download_models():
         global_status.update(phase="checking", message="FunASR 模型文件检查完成", progress=60, total_size=0, downloaded_size=0, speed=0)
         _report_to_main("checking", "FunASR 模型文件检查完成", progress=60, total_size=0, downloaded_size=0, speed=0)
         return
-    global_status.update(phase="downloading", message="正在从 ModelScope 下载缺失的模型文件...", progress=10, total_size=0, downloaded_size=0, speed=0)
-    _report_to_main("downloading", "正在从 ModelScope 下载缺失的模型文件...", progress=10, total_size=0, downloaded_size=0, speed=0)
+    global_status.update(phase="checking", message="正在直连检测 ModelScope 网络连通性...", progress=10, total_size=0, downloaded_size=0, speed=0)
+    _report_to_main("checking", "正在直连检测 ModelScope 网络连通性...", progress=10, total_size=0, downloaded_size=0, speed=0)
     try:
+        check_model_source_connectivity(
+            "ModelScope",
+            "https://www.modelscope.cn",
+            network_mode="direct",
+        )
+        global_status.update(phase="downloading", message="正在直连下载缺失的 ModelScope 模型文件...", progress=10, total_size=0, downloaded_size=0, speed=0)
+        _report_to_main("downloading", "正在直连下载缺失的 ModelScope 模型文件...", progress=10, total_size=0, downloaded_size=0, speed=0)
         snapshots = [
             (modelscope_model_files(REMOTE_MODEL_ID), MODEL_DIR_PATH),
             (modelscope_model_files(VAD_REMOTE_MODEL_ID), VAD_MODEL_DIR_PATH),

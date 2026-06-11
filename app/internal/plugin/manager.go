@@ -178,12 +178,26 @@ func (manager *Manager) start(ctx context.Context, id string, definition Definit
 	extra := map[string]string{"MAIN_SERVER_URL": mainURL}
 	if manager.registry.HasCapability(id, "model_download") {
 		_ = manager.statuses.Clear(id)
-		ariaEnv, err := manager.aria2.Environment(ctx)
-		if err != nil {
-			return err
+		if manager.aria2 == nil {
+			return fmt.Errorf("aria2 manager is unavailable")
 		}
-		for key, value := range ariaEnv {
-			extra[key] = value
+		if id == "whisper" {
+			binary, err := manager.aria2.Binary(ctx)
+			if err != nil {
+				return err
+			}
+			extra["ARIA2C_PATH"] = binary
+			extra["ARIA2_RPC_URL"] = ""
+			extra["ARIA2_RPC_SECRET"] = ""
+			extra["MODEL_NETWORK_MODE"] = "system_proxy"
+		} else {
+			ariaEnv, err := manager.aria2.Environment(ctx)
+			if err != nil {
+				return err
+			}
+			for key, value := range ariaEnv {
+				extra[key] = value
+			}
 		}
 		extra["PLUGIN_STATUS_FILE"] = manager.layout.PluginStatusFile(id)
 		manager.statuses.Update(id, RuntimeStatus{Phase: "initializing", Message: "正在启动插件进程并检查模型文件..."})
@@ -198,8 +212,12 @@ func (manager *Manager) start(ctx context.Context, id string, definition Definit
 	}
 	python := filepath.Join(manager.layout.PluginVenv(definition.Venv), "Scripts", "python.exe")
 	entry := filepath.Join(manager.layout.PluginsDir, definition.Folder, definition.Entry)
+	environment := platform.BaseEnvironment(extra)
+	if extra["MODEL_NETWORK_MODE"] == "direct" {
+		environment = platform.DirectEnvironment(extra)
+	}
 	process, err := startManagedProcess(manager.appContext, platform.CommandSpec{
-		Path: python, Args: []string{entry, "--port", fmt.Sprint(port)}, Env: platform.BaseEnvironment(extra),
+		Path: python, Args: []string{entry, "--port", fmt.Sprint(port)}, Env: environment,
 		Dir: filepath.Dir(entry), Stdout: logFile, Stderr: logFile, Hidden: true, KeepStdin: true,
 	})
 	_ = logFile.Close()

@@ -29,7 +29,10 @@ type DownloadStatus struct {
 }
 
 func NewRPCClient(url, secret string, timeout time.Duration) *RPCClient {
-	return &RPCClient{URL: url, Secret: secret, client: &http.Client{Timeout: timeout}}
+	return &RPCClient{
+		URL: url, Secret: secret,
+		client: &http.Client{Timeout: timeout, Transport: &http.Transport{Proxy: nil}},
+	}
 }
 
 func (client *RPCClient) Call(ctx context.Context, method string, params []any, out any) error {

@@ -4,11 +4,14 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"smartclassdownloader/internal/aria2"
+	"smartclassdownloader/internal/config"
 	"smartclassdownloader/internal/domain"
 	"smartclassdownloader/internal/platform"
 )
@@ -133,9 +136,91 @@ func TestStartupErrorReturnsReportedPluginFailure(t *testing.T) {
 	}
 }
 
+func TestWhisperUsesDedicatedSystemProxyAria2(t *testing.T) {
+	root := t.TempDir()
+	layout := platform.Layout{
+		LogsDir:         filepath.Join(root, "logs"),
+		PluginsDir:      filepath.Join(root, "plugins"),
+		PluginsEnvDir:   filepath.Join(root, "envs"),
+		PluginStatusDir: filepath.Join(root, "status"),
+		BinDir:          filepath.Join(root, "bin"),
+	}
+	for _, path := range []string{
+		layout.LogsDir,
+		filepath.Join(layout.PluginsDir, "whisper"),
+		filepath.Join(layout.PluginsEnvDir, "whisper_env"),
+		layout.PluginStatusDir,
+		layout.BinDir,
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(layout.PluginsEnvDir, "whisper_env", ".install_success"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(layout.BinDir, "aria2c.exe")
+	if err := os.WriteFile(binary, []byte("placeholder"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewRegistry(Manifest{SchemaVersion: 1, Plugins: []Definition{{
+		ID: "whisper", Folder: "whisper", Entry: "main.py", Venv: "whisper_env",
+		DefaultPort: 8000, HealthPath: "/status", Capabilities: []string{"model_download"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binaryManager := aria2.NewBinaryManager(layout, fixedSettingsProvider{settings: config.Settings{Aria2Path: binary}})
+	manager := NewManager(
+		context.Background(), layout, registry, NewStatusStore(layout), NewInstaller(layout, registry),
+		aria2.NewProcessManager(binaryManager),
+	)
+
+	original := startManagedProcess
+	defer func() { startManagedProcess = original }()
+	var spec platform.CommandSpec
+	startManagedProcess = func(_ context.Context, value platform.CommandSpec) (platform.ManagedProcess, error) {
+		spec = value
+		return alwaysAliveProcess{}, nil
+	}
+
+	started, err := manager.Start(context.Background(), "whisper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !started {
+		t.Fatal("whisper was not started")
+	}
+	env := testEnvironmentMap(spec.Env)
+	if env["MODEL_NETWORK_MODE"] != "system_proxy" {
+		t.Fatalf("MODEL_NETWORK_MODE = %q, want system_proxy", env["MODEL_NETWORK_MODE"])
+	}
+	if env["ARIA2_RPC_URL"] != "" || env["ARIA2_RPC_SECRET"] != "" {
+		t.Fatalf("whisper unexpectedly received shared aria2 RPC: %#v", env)
+	}
+	if env["ARIA2C_PATH"] != binary {
+		t.Fatalf("ARIA2C_PATH = %q, want %q", env["ARIA2C_PATH"], binary)
+	}
+}
+
 type alwaysAliveProcess struct{}
 
 func (alwaysAliveProcess) PID() int                   { return 1 }
 func (alwaysAliveProcess) Alive() bool                { return true }
 func (alwaysAliveProcess) Wait() error                { return nil }
 func (alwaysAliveProcess) Stop(context.Context) error { return nil }
+
+type fixedSettingsProvider struct {
+	settings config.Settings
+}
+
+func (provider fixedSettingsProvider) Current() config.Settings { return provider.settings }
+
+func testEnvironmentMap(entries []string) map[string]string {
+	values := map[string]string{}
+	for _, entry := range entries {
+		key, value, _ := strings.Cut(entry, "=")
+		values[strings.ToUpper(key)] = value
+	}
+	return values
+}
