@@ -10,8 +10,19 @@ import (
 type Validator struct{}
 
 func (Validator) File(path string, minBytes int64) bool {
+	if hasAria2ControlFile(path) {
+		return false
+	}
 	info, err := os.Stat(path)
 	return err == nil && info.Mode().IsRegular() && info.Size() > minBytes
+}
+
+func hasAria2ControlFile(path string) bool {
+	info, err := os.Stat(path + ".aria2")
+	if err == nil {
+		return !info.IsDir()
+	}
+	return !os.IsNotExist(err)
 }
 
 func (validator Validator) ValidateCourse(context *Context) error {
