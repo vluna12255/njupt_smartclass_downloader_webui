@@ -75,11 +75,13 @@ func TestConcurrentStartLaunchesPluginOnce(t *testing.T) {
 	original := startManagedProcess
 	defer func() { startManagedProcess = original }()
 	var launches int32
+	var spec platform.CommandSpec
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var once sync.Once
-	startManagedProcess = func(context.Context, platform.CommandSpec) (platform.ManagedProcess, error) {
+	startManagedProcess = func(_ context.Context, value platform.CommandSpec) (platform.ManagedProcess, error) {
 		atomic.AddInt32(&launches, 1)
+		spec = value
 		once.Do(func() { close(entered) })
 		<-release
 		return alwaysAliveProcess{}, nil
@@ -121,6 +123,7 @@ func TestConcurrentStartLaunchesPluginOnce(t *testing.T) {
 	if startupTasks != 1 {
 		t.Fatalf("startup tasks = %d, want 1", startupTasks)
 	}
+	assertPythonUTF8Environment(t, testEnvironmentMap(spec.Env))
 }
 
 func TestStartupErrorReturnsReportedPluginFailure(t *testing.T) {
@@ -201,6 +204,7 @@ func TestWhisperUsesDedicatedSystemProxyAria2(t *testing.T) {
 	if env["ARIA2C_PATH"] != binary {
 		t.Fatalf("ARIA2C_PATH = %q, want %q", env["ARIA2C_PATH"], binary)
 	}
+	assertPythonUTF8Environment(t, env)
 }
 
 type alwaysAliveProcess struct{}
@@ -223,4 +227,14 @@ func testEnvironmentMap(entries []string) map[string]string {
 		values[strings.ToUpper(key)] = value
 	}
 	return values
+}
+
+func assertPythonUTF8Environment(t *testing.T, env map[string]string) {
+	t.Helper()
+	if env["PYTHONIOENCODING"] != "utf-8" {
+		t.Fatalf("PYTHONIOENCODING = %q, want utf-8", env["PYTHONIOENCODING"])
+	}
+	if env["PYTHONUTF8"] != "1" {
+		t.Fatalf("PYTHONUTF8 = %q, want 1", env["PYTHONUTF8"])
+	}
 }

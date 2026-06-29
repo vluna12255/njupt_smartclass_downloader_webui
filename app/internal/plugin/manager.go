@@ -175,7 +175,11 @@ func (manager *Manager) start(ctx context.Context, id string, definition Definit
 	manager.mu.Lock()
 	mainURL := manager.mainURL
 	manager.mu.Unlock()
-	extra := map[string]string{"MAIN_SERVER_URL": mainURL}
+	extra := map[string]string{
+		"MAIN_SERVER_URL":  mainURL,
+		"PYTHONIOENCODING": "utf-8",
+		"PYTHONUTF8":       "1",
+	}
 	if manager.registry.HasCapability(id, "model_download") {
 		_ = manager.statuses.Clear(id)
 		if manager.aria2 == nil {

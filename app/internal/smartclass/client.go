@@ -39,7 +39,13 @@ func NewSessionHTTPClient(timeout time.Duration) (*http.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &http.Client{Timeout: timeout, Jar: jar}, nil
+	return &http.Client{Timeout: timeout, Jar: jar, Transport: newDirectTransport()}, nil
+}
+
+func newDirectTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return transport
 }
 
 func ApplyDefaultHeaders(request *http.Request) {
