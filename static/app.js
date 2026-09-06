@@ -288,7 +288,10 @@ window.currentConfig = {};
                 return html;
             })
             .then(html => {
-                document.getElementById('video-container').innerHTML = html;
+                if (activeSearchController !== controller) return;
+                const container = document.getElementById('video-container');
+                container.innerHTML = html;
+                initializeVideoCovers(container);
                 updateDownloadBtn();
             })
             .catch(error => {
@@ -325,6 +328,7 @@ window.currentConfig = {};
         }
         
         function showSearchLoading() {
+            cancelVideoCoverLoads();
             const container = document.getElementById('video-container');
             container.innerHTML = `
                 <div class="col-span-full flex flex-col items-center justify-center text-slate-400 py-24 animate-fade-in">
@@ -344,6 +348,7 @@ window.currentConfig = {};
         }
 
         function showInitialState() {
+            cancelVideoCoverLoads();
             const container = document.getElementById('video-container');
             container.innerHTML = `
                 <div class="col-span-full flex flex-col items-center justify-center text-slate-400 py-24 animate-fade-in select-none">

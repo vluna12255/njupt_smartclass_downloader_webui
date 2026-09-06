@@ -7,7 +7,7 @@
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path></svg>
     </div>
     <div class="w-full aspect-video bg-gray-200">
-        {{if .CoverURL}}<img src="{{.CoverURL}}" draggable="false" class="w-full h-full object-cover">{{else}}<div class="w-full h-full flex items-center justify-center text-gray-400">无封面</div>{{end}}
+        <img src="/static/images/covers/load-img.png" data-cover-url="{{.CoverURL}}" alt="课程封面" draggable="false" class="w-full h-full object-cover">
     </div>
     <div class="p-3">
         <h3 class="font-bold text-gray-800 text-sm line-clamp-1 mb-1" title="{{.CourseName}} {{.Teachers}}">{{.CourseName}}&nbsp;&nbsp;{{.Teachers}}</h3>
